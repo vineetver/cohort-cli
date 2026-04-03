@@ -1,10 +1,8 @@
 use faer::Mat;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 
-use super::cauchy;
 use super::null_model::NullModel;
-use super::skat_pval;
-use super::spa;
+use super::stats;
 use super::weights;
 
 /// Full STAAR results for one gene: all tests × all annotation channels,
@@ -27,7 +25,7 @@ pub struct StaarResult {
 
     /// Per-annotation p-values: [channel][test_index]
     /// test_index: 0=Burden(1,25) 1=Burden(1,1) 2=SKAT(1,25) 3=SKAT(1,1) 4=ACAT-V(1,25) 5=ACAT-V(1,1)
-    /// channel order matches weights::ANNOTATION_CHANNELS
+    /// channel order matches AnnotationWeights::DISPLAY_NAMES
     pub per_annotation: Vec<[f64; 6]>,
 
     /// Per-test omnibus: Cauchy across all annotation channels for one test type
@@ -83,7 +81,7 @@ fn burden_spa(g: &Mat<f64>, u: &Mat<f64>, w: &[f64], mu: &[f64]) -> f64 {
     }
 
     let score: f64 = (0..m).map(|j| w[j] * u[(j, 0)]).sum();
-    spa::spa_pvalue(score, mu, &w_g)
+    stats::spa_pvalue(score, mu, &w_g)
 }
 
 /// ACAT-V with SPA: per-variant saddlepoint p-values, Cauchy combined.
@@ -97,12 +95,12 @@ fn acat_v_spa(g: &Mat<f64>, u: &Mat<f64>, w: &[f64], mu: &[f64]) -> f64 {
     for j in 0..m {
         if w[j] == 0.0 { continue; }
         for i in 0..n { g_col[i] = g[(i, j)]; }
-        p_values.push(spa::spa_pvalue(u[(j, 0)], mu, &g_col));
+        p_values.push(stats::spa_pvalue(u[(j, 0)], mu, &g_col));
         cauchy_weights.push(w[j]);
     }
 
     if p_values.is_empty() { return 1.0; }
-    cauchy::cauchy_combine_weighted(&p_values, &cauchy_weights)
+    stats::cauchy_combine_weighted(&p_values, &cauchy_weights)
 }
 
 fn burden(u: &Mat<f64>, k: &Mat<f64>, w: &[f64], sigma2: f64) -> f64 {
@@ -137,7 +135,7 @@ fn skat(u: &Mat<f64>, k: &Mat<f64>, w: &[f64], sigma2: f64, kernel: &mut Mat<f64
         }
     }
     let eigenvalues = symmetric_eigenvalues(kernel);
-    skat_pval::mixture_chisq_pvalue(q, &eigenvalues)
+    stats::mixture_chisq_pvalue(q, &eigenvalues)
 }
 
 fn acat_v(u: &Mat<f64>, k: &Mat<f64>, w: &[f64], sigma2: f64) -> f64 {
@@ -153,7 +151,7 @@ fn acat_v(u: &Mat<f64>, k: &Mat<f64>, w: &[f64], sigma2: f64) -> f64 {
         cauchy_weights.push(w[j]);
     }
     if p_values.is_empty() { return 1.0; }
-    cauchy::cauchy_combine_weighted(&p_values, &cauchy_weights)
+    stats::cauchy_combine_weighted(&p_values, &cauchy_weights)
 }
 
 fn chisq1_pvalue(t: f64) -> f64 {
@@ -189,7 +187,7 @@ pub fn individual_tests(g: &Mat<f64>, null: &NullModel, use_spa: bool) -> Vec<f6
         let mut g_col = vec![0.0; n];
         (0..m).map(|j| {
             for i in 0..n { g_col[i] = g[(i, j)]; }
-            spa::spa_pvalue(u[(j, 0)], mu, &g_col)
+            stats::spa_pvalue(u[(j, 0)], mu, &g_col)
         }).collect()
     } else {
         let pg = null.project(g);
@@ -258,7 +256,7 @@ fn staar_tests(
     let base_acat_v_1_25 = run_acat_v(&wa_base_1_25);
     let base_acat_v_1_1 = run_acat_v(&wa_base_1_1);
 
-    let acat_o = cauchy::cauchy_combine(&[
+    let acat_o = stats::cauchy_combine(&[
         base_burden_1_25, base_burden_1_1,
         base_skat_1_25, base_skat_1_1,
         base_acat_v_1_25, base_acat_v_1_1,
@@ -303,12 +301,12 @@ fn staar_tests(
         per_annotation.push(p);
     }
 
-    let staar_b_1_25 = cauchy::cauchy_combine(&by_test[0]);
-    let staar_b_1_1 = cauchy::cauchy_combine(&by_test[1]);
-    let staar_s_1_25 = cauchy::cauchy_combine(&by_test[2]);
-    let staar_s_1_1 = cauchy::cauchy_combine(&by_test[3]);
-    let staar_a_1_25 = cauchy::cauchy_combine(&by_test[4]);
-    let staar_a_1_1 = cauchy::cauchy_combine(&by_test[5]);
+    let staar_b_1_25 = stats::cauchy_combine(&by_test[0]);
+    let staar_b_1_1 = stats::cauchy_combine(&by_test[1]);
+    let staar_s_1_25 = stats::cauchy_combine(&by_test[2]);
+    let staar_s_1_1 = stats::cauchy_combine(&by_test[3]);
+    let staar_a_1_25 = stats::cauchy_combine(&by_test[4]);
+    let staar_a_1_1 = stats::cauchy_combine(&by_test[5]);
 
     let mut all_p: Vec<f64> = Vec::with_capacity(6 + n_channels * 6);
     all_p.extend_from_slice(&[
@@ -317,7 +315,7 @@ fn staar_tests(
         base_acat_v_1_25, base_acat_v_1_1,
     ]);
     for p in &per_annotation { all_p.extend_from_slice(p); }
-    let staar_o = cauchy::cauchy_combine(&all_p);
+    let staar_o = stats::cauchy_combine(&all_p);
 
     StaarResult {
         burden_1_25: base_burden_1_25, burden_1_1: base_burden_1_1,

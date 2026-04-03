@@ -1,27 +1,23 @@
 use clap::Parser;
 
-mod annotation_db;
 mod cli;
 mod commands;
 mod config;
+mod data;
 mod db;
 mod error;
-mod feedback;
 mod ingest;
-mod mode;
 mod output;
-mod packs;
 mod resource;
 mod staar;
 #[cfg(test)]
 mod test_fixtures;
-mod tui;
+mod setup;
 mod types;
-mod variant_set;
 
 use cli::{Cli, Command};
 use error::FavorError;
-use mode::OutputMode;
+use output::OutputMode;
 
 fn main() {
     let cli = Cli::parse();
@@ -44,11 +40,11 @@ fn run(
     dry_run: bool,
 ) -> Result<(), FavorError> {
     match command {
-        Command::Init { path, force } => commands::init::run(path, force, out, mode),
+        Command::Init { path, force } => setup::init(path, force, out, mode),
         Command::Setup { environment, memory_budget } => {
-            commands::setup::run(out, mode, environment, memory_budget)
+            setup::setup(out, mode, environment, memory_budget)
         }
-        Command::Data { action } => commands::data::run(action, out),
+        Command::Data { action } => data::transfer::run(action, out),
         Command::Ingest { input, output, emit_sql, build } => {
             commands::ingest::run(input, output, emit_sql, build, out, dry_run)
         }
@@ -102,8 +98,8 @@ fn run(
         } => commands::meta_staar::run(
             studies, masks, maf_cutoff, window_size, output_path, out, dry_run,
         ),
-        Command::Schema { table } => commands::schema_cmd::run(table, out),
-        Command::Manifest => commands::manifest::run(out),
-        Command::Uninstall => commands::uninstall::run(out),
+        Command::Schema { table } => commands::inspect::schema(table, out),
+        Command::Manifest => commands::inspect::manifest(out),
+        Command::Uninstall => setup::uninstall(out),
     }
 }

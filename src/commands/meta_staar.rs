@@ -12,12 +12,13 @@ use rayon::prelude::*;
 use serde_json::json;
 
 use crate::config::Config;
-use crate::db::engine::DuckEngine;
+use crate::db::DuckEngine;
 use crate::error::FavorError;
 use crate::output::Output;
 use crate::resource::Resources;
 use crate::staar::masks::MaskGroup;
 use crate::staar::{self, GeneResult, MaskCategory, MaskType};
+use crate::types::AnnotationWeights;
 
 pub fn run(
     studies: Vec<PathBuf>,
@@ -86,7 +87,7 @@ pub fn run(
         }
         out.status(&format!("    {} merged variants", meta_variants.len()));
 
-        let annotated = staar::meta::meta_to_annotated(&meta_variants, chrom);
+        let annotated: Vec<crate::types::AnnotatedVariant> = meta_variants.iter().map(|mv| mv.variant.clone()).collect();
         let chrom_indices: Vec<usize> = (0..annotated.len()).collect();
 
         let mut chrom_masks: Vec<(MaskType, Vec<MaskGroup>)> = Vec::new();
@@ -177,7 +178,7 @@ fn write_meta_results(
     out: &dyn Output,
 ) -> Result<(), FavorError> {
     out.status("Writing MetaSTAAR results...");
-    let channels = staar::weights::ANNOTATION_CHANNELS;
+    let channels = AnnotationWeights::DISPLAY_NAMES;
     let n_channels = channels.len();
 
     for (mask_type, results) in all_mask_results {

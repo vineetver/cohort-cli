@@ -1,33 +1,29 @@
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Builder, Int32Builder, StringBuilder, UInt32Builder};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
 use faer::Mat;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use serde_json::json;
 
-use crate::commands::dry_run;
+use crate::commands;
 use crate::config::Config;
-use crate::db::engine::DuckEngine;
-use crate::db::query::{query_scalar, query_strings};
-use crate::variant_set::VariantSet;
+use crate::db::DuckEngine;
+use crate::db::{query_scalar, query_strings};
+use crate::data::VariantSet;
 use crate::error::FavorError;
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::staar::masks::{AnnotatedVariant, MaskGroup};
+use crate::staar::masks::MaskGroup;
+use crate::staar::phenotype::{
+    augment_covariates, load_ancestry_groups, load_known_loci, load_phenotype,
+};
+use crate::staar::results::{write_individual_results, write_results};
 use crate::staar::{self, GeneResult, MaskCategory, MaskType};
+use crate::types::{
+    AnnotatedVariant, AnnotationWeights, Chromosome, FunctionalAnnotation, RegulatoryFlags,
+};
 
 const GB: u64 = 1024 * 1024 * 1024;
 const MB: u64 = 1024 * 1024;
-
-const WEIGHT_COL_START: usize = 14;
-const WEIGHT_COL_COUNT: usize = 11;
 
 struct StaarConfig {
     genotypes: PathBuf,
@@ -41,7 +37,7 @@ struct StaarConfig {
     individual: bool,
     spa: bool,
     ancestry_col: Option<String>,
-    scang_params: staar::scang::ScangParams,
+    scang_params: staar::masks::ScangParams,
     known_loci: Option<PathBuf>,
     emit_sumstats: bool,
     output_dir: PathBuf,
@@ -97,7 +93,8 @@ pub fn run(
     let is_multi = config.trait_names.len() > 1;
     let primary_trait = &config.trait_names[0];
 
-    let (y, mut x, trait_type, n) = load_phenotype(&engine, &config, &geno, primary_trait, out)?;
+    let pheno = load_phenotype(&engine, &config.phenotype, &config.covariates, &geno, primary_trait, out)?;
+    let (y, mut x, trait_type, n) = (pheno.y, pheno.x, pheno.trait_type, pheno.n);
 
     if let Some(ref loci_path) = config.known_loci {
         let x_cond = load_known_loci(&engine, &geno, loci_path, n, out)?;
@@ -147,8 +144,8 @@ pub fn run(
     if is_multi {
         out.status(&format!("  MultiSTAAR: {} traits", config.trait_names.len()));
         for trait_name in &config.trait_names[1..] {
-            let (y_k, _, tt_k, _) = load_phenotype(&engine, &config, &geno, trait_name, out)?;
-            extra_nulls.push(fit_null_model(&y_k, &x, tt_k, out)?);
+            let pheno_k = load_phenotype(&engine, &config.phenotype, &config.covariates, &geno, trait_name, out)?;
+            extra_nulls.push(fit_null_model(&pheno_k.y, &x, pheno_k.trait_type, out)?);
         }
     }
 
@@ -164,10 +161,13 @@ pub fn run(
     )?;
 
     if config.individual && !individual_pvals.is_empty() {
-        write_individual_results(&engine, &individual_pvals, &variants, &config, out)?;
+        write_individual_results(&engine, &individual_pvals, &variants, &config.output_dir, out)?;
     }
 
-    write_results(&engine, &results, &config, &null_model, trait_type, n, out)?;
+    write_results(
+        &engine, &results, &config.trait_names,
+        config.maf_cutoff, &config.output_dir, &null_model, trait_type, n, out,
+    )?;
     Ok(())
 }
 
@@ -245,7 +245,7 @@ fn validate_and_parse(
         individual,
         spa,
         ancestry_col,
-        scang_params: staar::scang::ScangParams {
+        scang_params: staar::masks::ScangParams {
             lmin: scang_lmin,
             lmax: scang_lmax,
             step: scang_step,
@@ -269,11 +269,11 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
     let overhead = 4 * GB;
     let recommended = chr1_geno + overhead;
 
-    let plan = dry_run::DryRunPlan {
+    let plan = commands::DryRunPlan {
         command: "staar".into(),
         inputs: json!({
             "genotypes": config.genotypes.to_string_lossy(),
-            "genotype_size": dry_run::file_size(&config.genotypes),
+            "genotype_size": commands::file_size(&config.genotypes),
             "annotations": config.annotations.to_string_lossy(),
             "annotation_rows": ann_rows,
             "n_samples": n_samples,
@@ -281,15 +281,15 @@ fn emit_dry_run(config: &StaarConfig, out: &dyn Output) -> Result<(), FavorError
             "trait": config.trait_names[0],
             "maf_cutoff": config.maf_cutoff,
         }),
-        memory: dry_run::MemoryEstimate {
+        memory: commands::MemoryEstimate {
             minimum: "4G".into(),
-            recommended: dry_run::human_bytes(recommended.max(8 * GB)),
+            recommended: commands::human_bytes(recommended.max(8 * GB)),
             minimum_bytes: 4 * GB,
             recommended_bytes: recommended.max(8 * GB),
         },
         output_path: config.output_dir.to_string_lossy().into(),
     };
-    dry_run::emit(&plan, out);
+    commands::emit(&plan, out);
     Ok(())
 }
 
@@ -360,7 +360,7 @@ fn join_with_annotations(
     for r in required {
         if !ann_cols.iter().any(|c| c == r) {
             let tier_hint = match ann_vs.kind() {
-                Some(crate::variant_set::VariantSetKind::Annotated { tier }) => format!(" (tier: {tier})"),
+                Some(crate::data::VariantSetKind::Annotated { tier }) => format!(" (tier: {tier})"),
                 _ => String::new(),
             };
             return Err(FavorError::DataMissing(format!(
@@ -424,179 +424,6 @@ fn join_with_annotations(
     Ok(engine)
 }
 
-fn load_phenotype(
-    engine: &DuckEngine,
-    config: &StaarConfig,
-    geno: &staar::genotype::GenotypeResult,
-    trait_name: &str,
-    out: &dyn Output,
-) -> Result<(Mat<f64>, Mat<f64>, staar::TraitType, usize), FavorError> {
-    out.status("Step 3/6: Loading phenotype...");
-
-    // Create _pheno table if it doesn't exist yet (first trait)
-    engine.execute(&format!(
-        "CREATE TEMP TABLE IF NOT EXISTS _pheno AS SELECT * FROM read_csv_auto('{}')",
-        config.phenotype.display(),
-    ))?;
-
-    let pheno_cols = query_strings(engine, "SELECT column_name FROM (DESCRIBE _pheno)")?;
-    if !pheno_cols.contains(&trait_name.to_string()) {
-        return Err(FavorError::Input(format!(
-            "Trait '{}' not in phenotype. Available: {}", trait_name, pheno_cols.join(", ")
-        )));
-    }
-    for cov in &config.covariates {
-        if !pheno_cols.contains(cov) {
-            return Err(FavorError::Input(format!("Covariate '{cov}' not in phenotype")));
-        }
-    }
-
-    let trait_type = if query_scalar(engine, &format!(
-        "SELECT COUNT(DISTINCT \"{trait_name}\") FROM _pheno"))? <= 2 {
-        staar::TraitType::Binary
-    } else {
-        staar::TraitType::Continuous
-    };
-    out.status(&format!("  Trait '{trait_name}' -> {:?}", trait_type));
-
-    let id_col = &pheno_cols[0];
-    let cov_select = if config.covariates.is_empty() { String::new() }
-        else { format!(", {}", config.covariates.iter().map(|c| format!("p.\"{c}\"")).collect::<Vec<_>>().join(", ")) };
-
-    let sample_list = geno.sample_names.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",");
-    let pheno_sql = format!(
-        "SELECT p.\"{trait_name}\" {cov_select} FROM _pheno p \
-         WHERE p.\"{id_col}\" IN ({sample_list}) AND p.\"{trait_name}\" IS NOT NULL \
-         ORDER BY p.\"{id_col}\""
-    );
-
-    let (y, x) = read_phenotype_matrix(engine, &pheno_sql, config.covariates.len())?;
-    let n = y.nrows();
-    out.status(&format!("  {} samples with phenotype + genotype", n));
-    if n < 10 {
-        return Err(FavorError::Analysis(format!("Only {n} samples. Need >= 10.")));
-    }
-
-    Ok((y, x, trait_type, n))
-}
-
-fn load_ancestry_groups(
-    engine: &DuckEngine,
-    col: &str,
-    geno: &staar::genotype::GenotypeResult,
-    out: &dyn Output,
-) -> Result<Vec<usize>, FavorError> {
-    let pheno_cols = query_strings(engine, "SELECT column_name FROM (DESCRIBE _pheno)")?;
-    if !pheno_cols.contains(&col.to_string()) {
-        return Err(FavorError::Input(format!(
-            "Ancestry column '{col}' not in phenotype. Available: {}", pheno_cols.join(", ")
-        )));
-    }
-
-    let id_col = &pheno_cols[0];
-    let sample_list = geno.sample_names.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",");
-
-    // Get distinct population labels and map to 0-indexed integers
-    let labels = query_strings(engine, &format!(
-        "SELECT DISTINCT \"{col}\" FROM _pheno WHERE \"{id_col}\" IN ({sample_list}) ORDER BY \"{col}\""
-    ))?;
-    out.status(&format!("  Populations: {}", labels.join(", ")));
-
-    let sql = format!(
-        "SELECT \"{col}\" FROM _pheno WHERE \"{id_col}\" IN ({sample_list}) ORDER BY \"{id_col}\""
-    );
-    let conn = engine.connection();
-    let mut stmt = conn.prepare(&sql).map_err(|e| FavorError::Analysis(format!("{e}")))?;
-    let mut rows = stmt.query([]).map_err(|e| FavorError::Analysis(format!("{e}")))?;
-
-    let mut groups = Vec::new();
-    while let Ok(Some(row)) = rows.next() {
-        let label: String = row.get(0).unwrap_or_default();
-        let idx = labels.iter().position(|l| l == &label).unwrap_or(0);
-        groups.push(idx);
-    }
-    Ok(groups)
-}
-
-fn load_known_loci(
-    engine: &DuckEngine,
-    geno: &staar::genotype::GenotypeResult,
-    loci_path: &Path,
-    n_samples: usize,
-    out: &dyn Output,
-) -> Result<Mat<f64>, FavorError> {
-    let content = std::fs::read_to_string(loci_path)?;
-    let loci: Vec<(&str, i32)> = content.lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| {
-            let parts: Vec<&str> = l.split(':').collect();
-            if parts.len() >= 2 {
-                let chrom = parts[0].strip_prefix("chr").unwrap_or(parts[0]);
-                parts[1].parse::<i32>().ok().map(|pos| (chrom, pos))
-            } else { None }
-        })
-        .collect();
-
-    if loci.is_empty() {
-        return Err(FavorError::Input("Known loci file is empty or unparseable.".into()));
-    }
-
-    out.status(&format!("  Loading {} known loci for conditional analysis...", loci.len()));
-
-    let extract_cols = staar::geno_load::dosage_columns(n_samples);
-
-    let mut by_chrom: std::collections::HashMap<&str, Vec<(usize, i32)>> = std::collections::HashMap::new();
-    for (col, &(chrom, pos)) in loci.iter().enumerate() {
-        by_chrom.entry(chrom).or_default().push((col, pos));
-    }
-
-    let mut x_cond = Mat::zeros(n_samples, loci.len());
-
-    for (chrom, chrom_loci) in &by_chrom {
-        let geno_path = format!("{}/chromosome={chrom}/data.parquet", geno.output_dir.display());
-        let positions = chrom_loci.iter().map(|(_, p)| p.to_string()).collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT position, {extract_cols} FROM read_parquet('{geno_path}') WHERE position IN ({positions}) ORDER BY position"
-        );
-        let conn = engine.connection();
-        let mut stmt = conn.prepare(&sql)
-            .map_err(|e| FavorError::Analysis(format!("Known loci {chrom}: {e}")))?;
-        let mut rows = stmt.query([])
-            .map_err(|e| FavorError::Analysis(format!("Known loci {chrom}: {e}")))?;
-
-        let pos_to_cols: std::collections::HashMap<i32, Vec<usize>> = {
-            let mut m: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
-            for &(col, pos) in chrom_loci {
-                m.entry(pos).or_default().push(col);
-            }
-            m
-        };
-
-        while let Ok(Some(row)) = rows.next() {
-            let pos: i32 = row.get(0).unwrap_or(0);
-            if let Some(cols) = pos_to_cols.get(&pos) {
-                for &col in cols {
-                    for i in 0..n_samples {
-                        x_cond[(i, col)] = row.get::<_, f64>(i + 1).unwrap_or(0.0);
-                    }
-                }
-            }
-        }
-    }
-    Ok(x_cond)
-}
-
-fn augment_covariates(x: &Mat<f64>, x_cond: &Mat<f64>) -> Mat<f64> {
-    let n = x.nrows();
-    let k_orig = x.ncols();
-    let k_cond = x_cond.ncols();
-    let mut x_new = Mat::zeros(n, k_orig + k_cond);
-    for i in 0..n {
-        for j in 0..k_orig { x_new[(i, j)] = x[(i, j)]; }
-        for j in 0..k_cond { x_new[(i, k_orig + j)] = x_cond[(i, j)]; }
-    }
-    x_new
-}
 
 fn fit_null_model(
     y: &Mat<f64>,
@@ -631,11 +458,11 @@ fn run_chromosome_tests(
     let max_variants_in_ram = (geno_budget / bytes_per_variant).max(1000) as usize;
     out.status(&format!("  Genotype budget: {} variants in RAM ({} per variant x {} samples)",
         max_variants_in_ram,
-        crate::commands::data::human_size(bytes_per_variant),
+        crate::data::transfer::human_size(bytes_per_variant),
         n,
     ));
 
-    let extract_cols = staar::geno_load::dosage_columns(n);
+    let extract_cols = staar::genotype::dosage_columns(n);
 
     let chromosomes = query_strings(engine,
         "SELECT DISTINCT chrom FROM _rare ORDER BY chrom")?;
@@ -674,8 +501,9 @@ fn run_chromosome_tests(
     let mut individual_pvals: Vec<(usize, f64)> = Vec::new();
 
     for chrom in &chromosomes {
+        let chrom_parsed: Chromosome = chrom.parse().unwrap_or(Chromosome::Autosome(1));
         let chrom_variant_indices: Vec<usize> = variants.iter().enumerate()
-            .filter(|(_, v)| v.chromosome == *chrom)
+            .filter(|(_, v)| v.chromosome == chrom_parsed)
             .map(|(i, _)| i)
             .collect();
 
@@ -697,7 +525,7 @@ fn run_chromosome_tests(
         };
 
         let scang_all: Vec<(u32, Vec<MaskGroup>)> = if has_scang {
-            staar::scang::build_scang_windows(
+            staar::masks::build_scang_windows(
                 &variants, &chrom_variant_indices, chrom, &config.scang_params,
             )
         } else {
@@ -715,7 +543,7 @@ fn run_chromosome_tests(
 
             // Load entire chromosome without per-position IN-list — avoids
             // serializing thousands of positions into the SQL string.
-            let (geno_flat, loaded_positions) = staar::geno_load::load_all(
+            let (geno_flat, loaded_positions) = staar::genotype::load_all(
                 engine, &geno_path, n, &extract_cols,
             )?;
 
@@ -771,8 +599,8 @@ fn run_chromosome_tests(
             }
 
             if config.individual {
-                let g = staar::geno_load::to_mat(&geno_flat, n, n_chrom);
-                let pvals = staar::score_test::individual_tests(&g, ctx.null_model, ctx.use_spa);
+                let g = staar::genotype::to_mat(&geno_flat, n, n_chrom);
+                let pvals = staar::score::individual_tests(&g, ctx.null_model, ctx.use_spa);
                 for (local, pval) in pvals.into_iter().enumerate() {
                     individual_pvals.push((chrom_variant_indices[local], pval));
                 }
@@ -813,11 +641,11 @@ fn run_chromosome_tests(
             if config.individual {
                 for chunk in chrom_variant_indices.chunks(max_variants_in_ram) {
                     let positions: Vec<u32> = chunk.iter().map(|&i| variants[i].position).collect();
-                    let geno_flat = staar::geno_load::load(
+                    let geno_flat = staar::genotype::load(
                         engine, &geno_path, &positions, n, &extract_cols,
                     )?;
-                    let g = staar::geno_load::to_mat(&geno_flat, n, positions.len());
-                    let pvals = staar::score_test::individual_tests(&g, ctx.null_model, ctx.use_spa);
+                    let g = staar::genotype::to_mat(&geno_flat, n, positions.len());
+                    let pvals = staar::score::individual_tests(&g, ctx.null_model, ctx.use_spa);
                     for (local, pval) in pvals.into_iter().enumerate() {
                         individual_pvals.push((chunk[local], pval));
                     }
@@ -869,7 +697,7 @@ fn run_batches(
         positions.sort_unstable();
         positions.dedup();
 
-        let geno_flat = staar::geno_load::load(
+        let geno_flat = staar::genotype::load(
             engine, geno_path, &positions, ctx.n_samples, extract_cols,
         )?;
 
@@ -900,232 +728,6 @@ fn run_batches(
     Ok(())
 }
 
-fn write_individual_results(
-    _engine: &DuckEngine,
-    pvals: &[(usize, f64)],
-    variants: &[AnnotatedVariant],
-    config: &StaarConfig,
-    out: &dyn Output,
-) -> Result<(), FavorError> {
-    let out_path = config.output_dir.join("individual.parquet");
-    let n = pvals.len();
-
-    // Sort by p-value for output ordering
-    let mut sorted: Vec<(usize, f64)> = pvals.to_vec();
-    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut b_chrom = StringBuilder::with_capacity(n, n * 2);
-    let mut b_pos = Int32Builder::with_capacity(n);
-    let mut b_ref = StringBuilder::with_capacity(n, n * 4);
-    let mut b_alt = StringBuilder::with_capacity(n, n * 4);
-    let mut b_maf = Float64Builder::with_capacity(n);
-    let mut b_gene = StringBuilder::with_capacity(n, n * 8);
-    let mut b_region = StringBuilder::with_capacity(n, n * 8);
-    let mut b_consequence = StringBuilder::with_capacity(n, n * 8);
-    let mut b_cadd = Float64Builder::with_capacity(n);
-    let mut b_pvalue = Float64Builder::with_capacity(n);
-
-    for &(idx, pval) in &sorted {
-        let v = &variants[idx];
-        b_chrom.append_value(&v.chromosome);
-        b_pos.append_value(v.position as i32);
-        b_ref.append_value(&v.ref_allele);
-        b_alt.append_value(&v.alt_allele);
-        b_maf.append_value(v.maf);
-        b_gene.append_value(&v.gene_name);
-        b_region.append_value(&v.region_type);
-        b_consequence.append_value(&v.consequence);
-        b_cadd.append_value(v.cadd_phred);
-        b_pvalue.append_value(pval);
-    }
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("chromosome", DataType::Utf8, false),
-        Field::new("position", DataType::Int32, false),
-        Field::new("ref_allele", DataType::Utf8, false),
-        Field::new("alt_allele", DataType::Utf8, false),
-        Field::new("maf", DataType::Float64, false),
-        Field::new("gene_name", DataType::Utf8, false),
-        Field::new("region_type", DataType::Utf8, false),
-        Field::new("consequence", DataType::Utf8, false),
-        Field::new("cadd_phred", DataType::Float64, false),
-        Field::new("pvalue", DataType::Float64, false),
-    ]));
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(b_chrom.finish()), Arc::new(b_pos.finish()),
-        Arc::new(b_ref.finish()), Arc::new(b_alt.finish()),
-        Arc::new(b_maf.finish()), Arc::new(b_gene.finish()),
-        Arc::new(b_region.finish()), Arc::new(b_consequence.finish()),
-        Arc::new(b_cadd.finish()), Arc::new(b_pvalue.finish()),
-    ];
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
-
-    let file = File::create(&out_path)
-        .map_err(|e| FavorError::Resource(format!("Create individual.parquet: {e}")))?;
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .build();
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-        .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-    writer.write(&batch).map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-    writer.close().map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
-
-    let n_sig = pvals.iter().filter(|(_, p)| *p < 5e-8).count();
-    out.success(&format!("  individual -> {} variants, {} genome-wide significant",
-        pvals.len(), n_sig));
-    Ok(())
-}
-
-fn write_results(
-    engine: &DuckEngine,
-    all_mask_results: &[(MaskType, Vec<GeneResult>)],
-    config: &StaarConfig,
-    null_model: &staar::null_model::NullModel,
-    trait_type: staar::TraitType,
-    n: usize,
-    out: &dyn Output,
-) -> Result<(), FavorError> {
-    out.status("Step 6/6: Writing results...");
-    let mut significant_genes: Vec<serde_json::Value> = Vec::new();
-
-    let n_rare: i64 = query_scalar(engine, "SELECT COUNT(*) FROM _rare")?;
-
-    let channels = staar::weights::ANNOTATION_CHANNELS;
-    let n_channels = channels.len();
-
-    for (mask_type, results) in all_mask_results {
-        if results.is_empty() { continue; }
-        let out_path = config.output_dir.join(format!("{}.parquet", mask_type.file_stem()));
-
-        // Sort by STAAR-O p-value
-        let mut sorted_results: Vec<&GeneResult> = results.iter().collect();
-        sorted_results.sort_by(|a, b| a.staar.staar_o.partial_cmp(&b.staar.staar_o).unwrap_or(std::cmp::Ordering::Equal));
-
-        let nr = sorted_results.len();
-        let mut b_ensembl = StringBuilder::with_capacity(nr, nr * 16);
-        let mut b_symbol = StringBuilder::with_capacity(nr, nr * 12);
-        let mut b_chrom = StringBuilder::with_capacity(nr, nr * 2);
-        let mut b_start = UInt32Builder::with_capacity(nr);
-        let mut b_end = UInt32Builder::with_capacity(nr);
-        let mut b_nvariants = UInt32Builder::with_capacity(nr);
-        let mut b_cmac = UInt32Builder::with_capacity(nr);
-
-        // 6 base + 6*n_channels per-annotation + 6 per-test omnibus + acat_o + staar_o = 6 + 6*11 + 6 + 2 = 80
-        let n_pval_cols = 6 + 6 * n_channels + 6 + 2;
-        let mut pval_builders: Vec<Float64Builder> = (0..n_pval_cols)
-            .map(|_| Float64Builder::with_capacity(nr))
-            .collect();
-
-        for r in &sorted_results {
-            let s = &r.staar;
-            b_ensembl.append_value(&r.ensembl_id);
-            b_symbol.append_value(&r.gene_symbol);
-            b_chrom.append_value(&r.chromosome);
-            b_start.append_value(r.start);
-            b_end.append_value(r.end);
-            b_nvariants.append_value(r.n_variants);
-            b_cmac.append_value(r.cumulative_mac);
-
-            let mut pi = 0;
-            for p in [s.burden_1_25, s.burden_1_1, s.skat_1_25, s.skat_1_1, s.acat_v_1_25, s.acat_v_1_1] {
-                pval_builders[pi].append_value(p);
-                pi += 1;
-            }
-            for ann_p in &s.per_annotation {
-                for &v in ann_p {
-                    pval_builders[pi].append_value(v);
-                    pi += 1;
-                }
-            }
-            // Pad if fewer annotation channels than expected
-            while pi < 6 + 6 * n_channels {
-                pval_builders[pi].append_value(f64::NAN);
-                pi += 1;
-            }
-            for p in [s.staar_b_1_25, s.staar_b_1_1, s.staar_s_1_25, s.staar_s_1_1, s.staar_a_1_25, s.staar_a_1_1, s.acat_o, s.staar_o] {
-                pval_builders[pi].append_value(p);
-                pi += 1;
-            }
-        }
-
-        // Build schema
-        let test_names = ["Burden(1,25)", "Burden(1,1)", "SKAT(1,25)", "SKAT(1,1)", "ACAT-V(1,25)", "ACAT-V(1,1)"];
-        let mut fields = vec![
-            Field::new("ensembl_id", DataType::Utf8, false),
-            Field::new("gene_symbol", DataType::Utf8, false),
-            Field::new("chromosome", DataType::Utf8, false),
-            Field::new("start", DataType::UInt32, false),
-            Field::new("end", DataType::UInt32, false),
-            Field::new("n_variants", DataType::UInt32, false),
-            Field::new("cMAC", DataType::UInt32, false),
-        ];
-        for test in &test_names {
-            fields.push(Field::new(*test, DataType::Float64, true));
-        }
-        for ch in channels {
-            for test in &test_names {
-                fields.push(Field::new(format!("{test}-{ch}"), DataType::Float64, true));
-            }
-        }
-        for name in ["STAAR-B(1,25)", "STAAR-B(1,1)", "STAAR-S(1,25)", "STAAR-S(1,1)", "STAAR-A(1,25)", "STAAR-A(1,1)", "ACAT-O", "STAAR-O"] {
-            fields.push(Field::new(name, DataType::Float64, true));
-        }
-        let schema = Arc::new(Schema::new(fields));
-
-        let mut columns: Vec<ArrayRef> = vec![
-            Arc::new(b_ensembl.finish()), Arc::new(b_symbol.finish()),
-            Arc::new(b_chrom.finish()), Arc::new(b_start.finish()),
-            Arc::new(b_end.finish()), Arc::new(b_nvariants.finish()),
-            Arc::new(b_cmac.finish()),
-        ];
-        for b in &mut pval_builders {
-            columns.push(Arc::new(b.finish()));
-        }
-
-        let batch = RecordBatch::try_new(schema.clone(), columns)
-            .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;
-        let file = File::create(&out_path)
-            .map_err(|e| FavorError::Resource(format!("Create {}: {e}", out_path.display())))?;
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .build();
-        let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| FavorError::Resource(format!("Parquet writer: {e}")))?;
-        writer.write(&batch).map_err(|e| FavorError::Resource(format!("Parquet write: {e}")))?;
-        writer.close().map_err(|e| FavorError::Resource(format!("Parquet close: {e}")))?;
-
-        let n_sig = results.iter().filter(|r| r.staar.staar_o < 2.5e-6).count();
-        for r in results.iter().filter(|r| r.staar.staar_o < 2.5e-6) {
-            significant_genes.push(json!({
-                "gene": r.ensembl_id, "mask": mask_type.file_stem(),
-                "STAAR-O": r.staar.staar_o, "n_variants": r.n_variants,
-            }));
-        }
-        out.success(&format!("  {} -> {} genes, {} significant",
-            mask_type.file_stem(), results.len(), n_sig));
-    }
-
-    let meta = json!({
-        "favor_staar_version": 1,
-        "traits": config.trait_names, "trait_type": format!("{:?}", trait_type),
-        "n_samples": n, "n_rare_variants": n_rare, "maf_cutoff": config.maf_cutoff,
-        "sigma2": null_model.sigma2, "significant_genes": significant_genes,
-    });
-    let _ = std::fs::write(config.output_dir.join("staar.meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap_or_default());
-
-    match staar::summary::generate_report(all_mask_results, &config.trait_names, n, n_rare, &config.output_dir, "STAAR Rare Variant Association") {
-        Ok(()) => out.success(&format!("  summary.html -> {}", config.output_dir.join("summary.html").display())),
-        Err(e) => out.warn(&format!("  Summary report failed: {e}")),
-    }
-
-    out.success(&format!("STAAR complete -> {}", config.output_dir.display()));
-    out.result_json(&meta);
-    Ok(())
-}
-
-
 fn score_gene(
     group: &MaskGroup, variants: &[AnnotatedVariant],
     geno_flat: &[f64], global_to_local: &std::collections::HashMap<usize, usize>,
@@ -1148,11 +750,10 @@ fn score_gene(
         .map(|&i| variants[i].maf)
         .collect();
 
-    let n_channels = staar::weights::ANNOTATION_CHANNELS.len();
-    let ann_matrix: Vec<Vec<f64>> = (0..n_channels)
+    let ann_matrix: Vec<Vec<f64>> = (0..11)
         .map(|ch| group.variant_indices.iter()
             .filter(|gi| global_to_local.contains_key(gi))
-            .map(|&i| variants[i].annotation_weights.get(ch).copied().unwrap_or(0.0))
+            .map(|&i| variants[i].annotation.weights.0[ch])
             .collect())
         .collect();
 
@@ -1182,7 +783,7 @@ fn score_gene(
         primary.acat_o = multi.multi_burden;
         primary
     } else {
-        staar::score_test::run_staar(&g, &ann_matrix, &mafs, ctx.null_model, ctx.use_spa)
+        staar::score::run_staar(&g, &ann_matrix, &mafs, ctx.null_model, ctx.use_spa)
     };
 
     let cmac: u32 = group.variant_indices.iter()
@@ -1274,58 +875,34 @@ fn read_variant_metadata(engine: &DuckEngine) -> Result<Vec<AnnotatedVariant>, F
     let mut variants = Vec::new();
 
     while let Ok(Some(row)) = rows.next() {
-        let weights: Vec<f64> = (WEIGHT_COL_START..WEIGHT_COL_START + WEIGHT_COL_COUNT)
-            .map(|c| row.get::<_, f64>(c).unwrap_or(0.0))
-            .collect();
+        let mut weights = [0.0f64; 11];
+        for (i, w) in weights.iter_mut().enumerate() {
+            *w = row.get::<_, f64>(14 + i).unwrap_or(0.0);
+        }
+        let chrom_str: String = row.get(0).unwrap_or_default();
         variants.push(AnnotatedVariant {
-            chromosome: row.get(0).unwrap_or_default(),
+            chromosome: chrom_str.parse().unwrap_or(Chromosome::Autosome(1)),
             position: row.get::<_, i32>(1).unwrap_or(0) as u32,
             ref_allele: row.get(2).unwrap_or_default(),
             alt_allele: row.get(3).unwrap_or_default(),
             maf: row.get(4).unwrap_or(0.0),
             gene_name: row.get(5).unwrap_or_default(),
-            region_type: row.get(6).unwrap_or_default(),
-            consequence: row.get(7).unwrap_or_default(),
-            cadd_phred: row.get(8).unwrap_or(0.0),
-            revel: row.get(9).unwrap_or(0.0),
-            annotation_weights: weights,
-            is_cage_promoter: row.get::<_, bool>(10).unwrap_or(false),
-            is_cage_enhancer: row.get::<_, bool>(11).unwrap_or(false),
-            is_ccre_promoter: row.get::<_, bool>(12).unwrap_or(false),
-            is_ccre_enhancer: row.get::<_, bool>(13).unwrap_or(false),
+            annotation: FunctionalAnnotation {
+                region_type: row.get(6).unwrap_or_default(),
+                consequence: row.get(7).unwrap_or_default(),
+                cadd_phred: row.get(8).unwrap_or(0.0),
+                revel: row.get(9).unwrap_or(0.0),
+                regulatory: RegulatoryFlags {
+                    cage_promoter: row.get::<_, bool>(10).unwrap_or(false),
+                    cage_enhancer: row.get::<_, bool>(11).unwrap_or(false),
+                    ccre_promoter: row.get::<_, bool>(12).unwrap_or(false),
+                    ccre_enhancer: row.get::<_, bool>(13).unwrap_or(false),
+                },
+                weights: AnnotationWeights(weights),
+            },
         });
     }
     Ok(variants)
-}
-
-fn read_phenotype_matrix(
-    engine: &DuckEngine, sql: &str, n_cov: usize,
-) -> Result<(Mat<f64>, Mat<f64>), FavorError> {
-    let conn = engine.connection();
-    let mut stmt = conn.prepare(sql).map_err(|e| FavorError::Analysis(format!("{e}")))?;
-    let mut rows = stmt.query([]).map_err(|e| FavorError::Analysis(format!("{e}")))?;
-
-    let mut y_vec = Vec::new();
-    let mut x_vecs: Vec<Vec<f64>> = vec![Vec::new(); n_cov];
-
-    while let Ok(Some(row)) = rows.next() {
-        y_vec.push(row.get::<_, f64>(0).unwrap_or(0.0));
-        for j in 0..n_cov {
-            x_vecs[j].push(row.get::<_, f64>(j + 1).unwrap_or(0.0));
-        }
-    }
-
-    let n = y_vec.len();
-    let mut y = Mat::zeros(n, 1);
-    let mut x = Mat::zeros(n, 1 + n_cov);
-    for i in 0..n {
-        y[(i, 0)] = y_vec[i];
-        x[(i, 0)] = 1.0; // intercept
-        for j in 0..n_cov {
-            x[(i, j + 1)] = x_vecs[j][i];
-        }
-    }
-    Ok((y, x))
 }
 
 fn parquet_row_count(path: &Path) -> i64 {

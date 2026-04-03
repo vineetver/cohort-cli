@@ -9,9 +9,9 @@
 use std::path::Path;
 
 use super::{Analysis, BuildGuess, CoordBase};
-use crate::annotation_db::AnnotationDb;
+use crate::data::AnnotationDb;
 use crate::config::Config;
-use crate::db::engine::DuckEngine;
+use crate::db::DuckEngine;
 use crate::error::FavorError;
 
 /// Chromosomes to try probing, in priority order.

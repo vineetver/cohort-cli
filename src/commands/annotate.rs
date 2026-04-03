@@ -2,16 +2,16 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
-use crate::annotation_db::AnnotationDb;
-use crate::commands::dry_run;
+use crate::data::AnnotationDb;
+use crate::commands;
 use crate::config::{Config, Tier};
-use crate::db::engine::DuckEngine;
-use crate::db::query::{query_scalar, query_strings};
+use crate::db::DuckEngine;
+use crate::db::{query_scalar, query_strings};
 use crate::error::FavorError;
 use crate::ingest::JoinKey;
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::variant_set::{VariantSet, VariantSetKind, VariantSetWriter};
+use crate::data::{VariantSet, VariantSetKind, VariantSetWriter};
 
 const JOIN_KEY_COLUMNS: &[&str] = &["chromosome", "position", "ref", "alt"];
 
@@ -58,7 +58,7 @@ pub fn run(
         input_vs.columns().len(), input_struct_cols.len()));
 
     if dry_run {
-        let plan = dry_run::DryRunPlan {
+        let plan = commands::DryRunPlan {
             command: "annotate".into(),
             inputs: json!({
                 "file": input.to_string_lossy(),
@@ -66,10 +66,10 @@ pub fn run(
                 "join_key": format!("{:?}", join_key),
                 "tier": tier.as_str(),
             }),
-            memory: dry_run::MemoryEstimate::duckdb_only(),
+            memory: commands::MemoryEstimate::duckdb_only(),
             output_path: output_path.to_string_lossy().into(),
         };
-        dry_run::emit(&plan, out);
+        commands::emit(&plan, out);
         return Ok(());
     }
 

@@ -1,13 +1,17 @@
 use serde_json::json;
 
-use crate::annotation_db::AnnotationDb;
 use crate::config::{Config, DirProbe, Tier};
-use crate::db::engine::DuckEngine;
+use crate::data::AnnotationDb;
+use crate::db::DuckEngine;
 use crate::error::FavorError;
 use crate::output::Output;
 use crate::resource::Resources;
 
-pub fn run(table: Option<String>, out: &dyn Output) -> Result<(), FavorError> {
+// ---------------------------------------------------------------------------
+// Schema (was commands/schema_cmd.rs)
+// ---------------------------------------------------------------------------
+
+pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), FavorError> {
     let config = Config::load_configured()?;
     let resources = Resources::detect_with_config(&config.resources);
 
@@ -180,4 +184,34 @@ fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf,
         "No parquet files found in {}. The table may be empty or corrupted.",
         table_dir.display(),
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Manifest (was commands/manifest.rs)
+// ---------------------------------------------------------------------------
+
+pub fn manifest(output: &dyn Output) -> Result<(), FavorError> {
+    let config = Config::load_configured()?;
+
+    let has_data = config.has_annotations();
+    let has_tissue = config.has_tissue();
+
+    let manifest = json!({
+        "commands": [
+            {"name": "ingest",    "status": "available",   "description": "Normalize VCF/TSV to canonical parquet with vid"},
+            {"name": "annotate",  "status": if has_data { "available" } else { "unavailable" }, "requires": "annotation data", "reason": if !has_data { "run `favor setup` then `favor data pull`" } else { "" }},
+            {"name": "enrich",    "status": if has_tissue { "available" } else { "unavailable" }, "requires": "tissue data", "reason": if !has_tissue { "no tissue/ directory found in root" } else { "" }},
+            {"name": "interpret", "status": if has_data { "available" } else { "unavailable" }, "requires": "annotated variants"},
+            {"name": "staar",     "status": if has_data { "available" } else { "unavailable" }, "requires": "genotypes + annotated variants"},
+        ],
+        "data": {
+            "root": config.data.root_dir,
+            "tier": config.data.tier.as_str(),
+            "annotations_present": has_data,
+            "tissue_present": has_tissue,
+        }
+    });
+
+    output.result_json(&manifest);
+    Ok(())
 }

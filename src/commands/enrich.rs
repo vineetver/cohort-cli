@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::commands::dry_run;
+use crate::commands;
 use crate::config::Config;
-use crate::db::engine::DuckEngine;
-use crate::db::query::{query_scalar, query_strings};
+use crate::db::DuckEngine;
+use crate::db::{query_scalar, query_strings};
 use crate::error::FavorError;
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::variant_set::VariantSet;
+use crate::data::VariantSet;
 
 struct EnrichTable {
     dir: &'static str,
@@ -93,7 +93,7 @@ pub fn run(
             .filter(|t| tissue_dir.join(t.dir).is_dir())
             .map(|t| t.name)
             .collect();
-        let plan = dry_run::DryRunPlan {
+        let plan = commands::DryRunPlan {
             command: "enrich".into(),
             inputs: json!({
                 "file": input.to_string_lossy(),
@@ -102,10 +102,10 @@ pub fn run(
                 "resolved_tissues": resolved_tissues,
                 "available_tables": available_tables,
             }),
-            memory: dry_run::MemoryEstimate::duckdb_only(),
+            memory: commands::MemoryEstimate::duckdb_only(),
             output_path: output_dir.to_string_lossy().into(),
         };
-        dry_run::emit(&plan, out);
+        commands::emit(&plan, out);
         return Ok(());
     }
 

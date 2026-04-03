@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::cli::GenomeBuild;
-use crate::commands::dry_run;
+use crate::commands;
 use crate::config::Config;
-use crate::db::engine::DuckEngine;
+use crate::db::DuckEngine;
 use crate::error::FavorError;
 use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::variant_set::{VariantSetKind, VariantSetWriter};
+use crate::data::{VariantSetKind, VariantSetWriter};
 
 pub fn run(
     input: PathBuf,
@@ -66,7 +66,7 @@ pub fn run(
                 if !config.data.root_dir.is_empty() {
                     let resources = Resources::detect_with_config(&config.resources);
                     if let Ok(engine) = DuckEngine::new(&resources) {
-                        let _ = ingest::build_detect::detect_build_and_coords(
+                        let _ = ingest::detect::detect_build_and_coords(
                             &mut analysis, &input, &engine, &config,
                         );
                     }
@@ -89,11 +89,11 @@ pub fn run(
     }
 
     if dry_run {
-        let plan = dry_run::DryRunPlan {
+        let plan = commands::DryRunPlan {
             command: "ingest".into(),
             inputs: json!({
                 "file": input.to_string_lossy(),
-                "file_size": dry_run::file_size(&input),
+                "file_size": commands::file_size(&input),
                 "format": format!("{:?}", analysis.format),
                 "join_key": format!("{:?}", analysis.join_key),
                 "build": format!("{:?}", analysis.build_guess),
@@ -101,10 +101,10 @@ pub fn run(
                 "columns_ambiguous": analysis.ambiguous.len(),
                 "needs_intervention": analysis.needs_intervention(),
             }),
-            memory: dry_run::MemoryEstimate::duckdb_only(),
+            memory: commands::MemoryEstimate::duckdb_only(),
             output_path: output_path.to_string_lossy().into(),
         };
-        dry_run::emit(&plan, out);
+        commands::emit(&plan, out);
         return Ok(());
     }
 
@@ -115,7 +115,7 @@ pub fn run(
     if analysis.format == InputFormat::Vcf {
         if emit_sql {
             let resources = Resources::detect_with_config(&config_resources);
-            let sql = ingest::sql_gen::generate_sql(&analysis, &input, &output_path, &resources);
+            let sql = ingest::sql::generate_sql(&analysis, &input, &output_path, &resources);
             let script_path = output_path.with_extension("ingest.sql");
             std::fs::write(&script_path, &sql)?;
             out.status(&format!("VCF hint script: {}", script_path.display()));
@@ -152,7 +152,7 @@ pub fn run(
     }
 
     let resources = Resources::detect_with_config(&config_resources);
-    let sql = ingest::sql_gen::generate_sql(&analysis, &input, &output_path, &resources);
+    let sql = ingest::sql::generate_sql(&analysis, &input, &output_path, &resources);
 
     if emit_sql || analysis.needs_intervention() {
         let script_path = output_path.with_extension("ingest.sql");

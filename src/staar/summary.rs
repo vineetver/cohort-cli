@@ -459,7 +459,7 @@ fn collect_pvalues(results: &[(MaskType, Vec<GeneResult>)]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::score_test::StaarResult;
+    use super::super::score::StaarResult;
 
     fn gene(chr: &str, start: u32, p: f64) -> GeneResult {
         GeneResult {

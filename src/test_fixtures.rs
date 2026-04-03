@@ -1,9 +1,11 @@
 use std::path::Path;
 
-use crate::staar::masks::AnnotatedVariant;
+use crate::types::{
+    AnnotatedVariant, AnnotationWeights, Chromosome, FunctionalAnnotation, RegulatoryFlags,
+};
 
 // Ground truth annotation weights from real OR11H1 stopgain on chr22.
-// Order matches staar::weights::ANNOTATION_CHANNELS exactly.
+// Order matches AnnotationWeights::NAMES exactly.
 const GROUND_TRUTH_WEIGHTS: [f64; 11] = [
     0.9957,  // cadd: 1 - 10^(-23.7/10)
     0.2149,  // linsight
@@ -20,21 +22,20 @@ const GROUND_TRUTH_WEIGHTS: [f64; 11] = [
 
 pub fn base_variant() -> AnnotatedVariant {
     AnnotatedVariant {
-        chromosome: "22".into(),
+        chromosome: Chromosome::Autosome(22),
         position: 15528164,
         ref_allele: "C".into(),
         alt_allele: "T".into(),
         maf: 0.0007,
         gene_name: "OR11H1".into(),
-        region_type: "exonic".into(),
-        consequence: "stopgain".into(),
-        cadd_phred: 23.7,
-        revel: 0.0,
-        annotation_weights: GROUND_TRUTH_WEIGHTS.to_vec(),
-        is_cage_promoter: false,
-        is_cage_enhancer: false,
-        is_ccre_promoter: false,
-        is_ccre_enhancer: false,
+        annotation: FunctionalAnnotation {
+            region_type: "exonic".into(),
+            consequence: "stopgain".into(),
+            cadd_phred: 23.7,
+            revel: 0.0,
+            weights: AnnotationWeights(GROUND_TRUTH_WEIGHTS),
+            regulatory: RegulatoryFlags::default(),
+        },
     }
 }
 
@@ -43,10 +44,13 @@ pub fn stopgain() -> AnnotatedVariant { base_variant() }
 pub fn splice() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528200,
-        region_type: "splicing".into(),
-        consequence: String::new(),
-        cadd_phred: 25.1,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "splicing".into(),
+            consequence: String::new(),
+            cadd_phred: 25.1,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -54,9 +58,12 @@ pub fn splice() -> AnnotatedVariant {
 pub fn missense_high() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528300,
-        consequence: "nonsynonymous SNV".into(),
-        cadd_phred: 28.0,
-        revel: 0.8,
+        annotation: FunctionalAnnotation {
+            consequence: "nonsynonymous SNV".into(),
+            cadd_phred: 28.0,
+            revel: 0.8,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -64,9 +71,12 @@ pub fn missense_high() -> AnnotatedVariant {
 pub fn missense_low() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528400,
-        consequence: "nonsynonymous SNV".into(),
-        cadd_phred: 8.0,
-        revel: 0.2,
+        annotation: FunctionalAnnotation {
+            consequence: "nonsynonymous SNV".into(),
+            cadd_phred: 8.0,
+            revel: 0.2,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -74,8 +84,11 @@ pub fn missense_low() -> AnnotatedVariant {
 pub fn synonymous() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528500,
-        consequence: "synonymous SNV".into(),
-        cadd_phred: 6.4,
+        annotation: FunctionalAnnotation {
+            consequence: "synonymous SNV".into(),
+            cadd_phred: 6.4,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -83,8 +96,11 @@ pub fn synonymous() -> AnnotatedVariant {
 pub fn frameshift() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528600,
-        consequence: "frameshift deletion".into(),
-        cadd_phred: 20.9,
+        annotation: FunctionalAnnotation {
+            consequence: "frameshift deletion".into(),
+            cadd_phred: 20.9,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -92,8 +108,11 @@ pub fn frameshift() -> AnnotatedVariant {
 pub fn stoploss() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528700,
-        consequence: "stoploss".into(),
-        cadd_phred: 15.0,
+        annotation: FunctionalAnnotation {
+            consequence: "stoploss".into(),
+            cadd_phred: 15.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -101,10 +120,13 @@ pub fn stoploss() -> AnnotatedVariant {
 pub fn upstream() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15527000,
-        region_type: "upstream".into(),
-        consequence: String::new(),
-        cadd_phred: 5.6,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "upstream".into(),
+            consequence: String::new(),
+            cadd_phred: 5.6,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -112,10 +134,13 @@ pub fn upstream() -> AnnotatedVariant {
 pub fn downstream() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15530000,
-        region_type: "downstream".into(),
-        consequence: String::new(),
-        cadd_phred: 4.2,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "downstream".into(),
+            consequence: String::new(),
+            cadd_phred: 4.2,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -123,10 +148,13 @@ pub fn downstream() -> AnnotatedVariant {
 pub fn upstream_downstream() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15531000,
-        region_type: "upstream;downstream".into(),
-        consequence: String::new(),
-        cadd_phred: 3.0,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "upstream;downstream".into(),
+            consequence: String::new(),
+            cadd_phred: 3.0,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -134,10 +162,13 @@ pub fn upstream_downstream() -> AnnotatedVariant {
 pub fn utr3() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15529000,
-        region_type: "UTR3".into(),
-        consequence: String::new(),
-        cadd_phred: 7.4,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "UTR3".into(),
+            consequence: String::new(),
+            cadd_phred: 7.4,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -145,11 +176,14 @@ pub fn utr3() -> AnnotatedVariant {
 pub fn cage_promoter() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15526000,
-        region_type: "intergenic".into(),
-        consequence: String::new(),
-        cadd_phred: 12.3,
-        revel: 0.0,
-        is_cage_promoter: true,
+        annotation: FunctionalAnnotation {
+            region_type: "intergenic".into(),
+            consequence: String::new(),
+            cadd_phred: 12.3,
+            revel: 0.0,
+            regulatory: RegulatoryFlags { cage_promoter: true, ..RegulatoryFlags::default() },
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -157,11 +191,14 @@ pub fn cage_promoter() -> AnnotatedVariant {
 pub fn cage_enhancer() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15525000,
-        region_type: "intergenic".into(),
-        consequence: String::new(),
-        cadd_phred: 8.1,
-        revel: 0.0,
-        is_cage_enhancer: true,
+        annotation: FunctionalAnnotation {
+            region_type: "intergenic".into(),
+            consequence: String::new(),
+            cadd_phred: 8.1,
+            revel: 0.0,
+            regulatory: RegulatoryFlags { cage_enhancer: true, ..RegulatoryFlags::default() },
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -169,11 +206,14 @@ pub fn cage_enhancer() -> AnnotatedVariant {
 pub fn ccre_pls() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15524000,
-        region_type: "intergenic".into(),
-        consequence: String::new(),
-        cadd_phred: 7.0,
-        revel: 0.0,
-        is_ccre_promoter: true,
+        annotation: FunctionalAnnotation {
+            region_type: "intergenic".into(),
+            consequence: String::new(),
+            cadd_phred: 7.0,
+            revel: 0.0,
+            regulatory: RegulatoryFlags { ccre_promoter: true, ..RegulatoryFlags::default() },
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -181,11 +221,14 @@ pub fn ccre_pls() -> AnnotatedVariant {
 pub fn ccre_els() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15523000,
-        region_type: "intergenic".into(),
-        consequence: String::new(),
-        cadd_phred: 8.7,
-        revel: 0.0,
-        is_ccre_enhancer: true,
+        annotation: FunctionalAnnotation {
+            region_type: "intergenic".into(),
+            consequence: String::new(),
+            cadd_phred: 8.7,
+            revel: 0.0,
+            regulatory: RegulatoryFlags { ccre_enhancer: true, ..RegulatoryFlags::default() },
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -194,10 +237,13 @@ pub fn ncrna() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15532000,
         gene_name: "RF00004".into(),
-        region_type: "ncRNA_exonic".into(),
-        consequence: String::new(),
-        cadd_phred: 9.9,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "ncRNA_exonic".into(),
+            consequence: String::new(),
+            cadd_phred: 9.9,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -206,10 +252,13 @@ pub fn intronic() -> AnnotatedVariant {
     AnnotatedVariant {
         position: 15528800,
         gene_name: "POTEH".into(),
-        region_type: "intronic".into(),
-        consequence: String::new(),
-        cadd_phred: 13.9,
-        revel: 0.0,
+        annotation: FunctionalAnnotation {
+            region_type: "intronic".into(),
+            consequence: String::new(),
+            cadd_phred: 13.9,
+            revel: 0.0,
+            ..base_variant().annotation
+        },
         ..base_variant()
     }
 }
@@ -225,28 +274,27 @@ pub fn all_variants() -> Vec<AnnotatedVariant> {
 }
 
 /// SQL that creates a FAVOR-schema-correct annotation parquet.
-/// Struct nesting matches the real full-tier parquet exactly for every column STAAR touches.
 fn annotation_rows_sql() -> String {
     let rows: Vec<String> = all_variants().iter().map(|v| {
-        let cage: &str = if v.is_cage_promoter && v.is_cage_enhancer {
+        let cage: &str = if v.annotation.regulatory.cage_promoter && v.annotation.regulatory.cage_enhancer {
             "{'cage_enhancer': 'e1@chr22', 'cage_promoter': 'p1@chr22', 'cage_tc': NULL}"
-        } else if v.is_cage_promoter {
+        } else if v.annotation.regulatory.cage_promoter {
             "{'cage_enhancer': NULL, 'cage_promoter': 'p1@chr22', 'cage_tc': NULL}"
-        } else if v.is_cage_enhancer {
+        } else if v.annotation.regulatory.cage_enhancer {
             "{'cage_enhancer': 'e1@chr22', 'cage_promoter': NULL, 'cage_tc': NULL}"
         } else {
             "NULL::STRUCT(cage_enhancer VARCHAR, cage_promoter VARCHAR, cage_tc VARCHAR)"
         };
 
-        let ccre_ann = if v.is_ccre_promoter { "'PLS'" }
-            else if v.is_ccre_enhancer { "'dELS'" }
+        let ccre_ann = if v.annotation.regulatory.ccre_promoter { "'PLS'" }
+            else if v.annotation.regulatory.ccre_enhancer { "'dELS'" }
             else { "NULL" };
 
-        let consequence_sql = if v.consequence.is_empty() { "NULL".into() }
-            else { format!("'{}'", v.consequence) };
+        let consequence_sql = if v.annotation.consequence.is_empty() { "NULL".into() }
+            else { format!("'{}'", v.annotation.consequence) };
 
-        let revel_sql = if v.revel == 0.0 { "NULL".into() }
-            else { format!("{}", v.revel) };
+        let revel_sql = if v.annotation.revel == 0.0 { "NULL".into() }
+            else { format!("{}", v.annotation.revel) };
 
         format!(
             "SELECT \
@@ -276,23 +324,23 @@ fn annotation_rows_sql() -> String {
                   'proximity_to_tsstes': 0.0::FLOAT, \
                   'transcription_factor': {w10}::FLOAT}} AS apc",
             pos = v.position,
-            rt = v.region_type,
+            rt = v.annotation.region_type,
             gene = v.gene_name,
             csq = consequence_sql,
-            cadd = v.cadd_phred,
+            cadd = v.annotation.cadd_phred,
             revel = revel_sql,
-            linsight = v.annotation_weights[1],
-            fathmm = v.annotation_weights[2],
+            linsight = v.annotation.weights.0[1],
+            fathmm = v.annotation.weights.0[2],
             cage = cage,
             ccre_ann = ccre_ann,
-            w3 = v.annotation_weights[3],
-            w4 = v.annotation_weights[4],
-            w5 = v.annotation_weights[5],
-            w6 = v.annotation_weights[6],
-            w7 = v.annotation_weights[7],
-            w8 = v.annotation_weights[8],
-            w9 = v.annotation_weights[9],
-            w10 = v.annotation_weights[10],
+            w3 = v.annotation.weights.0[3],
+            w4 = v.annotation.weights.0[4],
+            w5 = v.annotation.weights.0[5],
+            w6 = v.annotation.weights.0[6],
+            w7 = v.annotation.weights.0[7],
+            w8 = v.annotation.weights.0[8],
+            w9 = v.annotation.weights.0[9],
+            w10 = v.annotation.weights.0[10],
         )
     }).collect();
 
@@ -391,23 +439,31 @@ mod tests {
         let mut rows = stmt.query([]).unwrap();
         let mut variants = Vec::new();
         while let Ok(Some(row)) = rows.next() {
-            let weights: Vec<f64> = (14..25).map(|c| row.get::<_, f64>(c).unwrap_or(0.0)).collect();
+            let mut weights = [0.0f64; 11];
+            for (i, w) in weights.iter_mut().enumerate() {
+                *w = row.get::<_, f64>(14 + i).unwrap_or(0.0);
+            }
+            let chrom_str: String = row.get(0).unwrap_or_default();
             variants.push(AnnotatedVariant {
-                chromosome: row.get(0).unwrap_or_default(),
+                chromosome: chrom_str.parse().unwrap_or(Chromosome::Autosome(1)),
                 position: row.get::<_, i32>(1).unwrap_or(0) as u32,
                 ref_allele: row.get(2).unwrap_or_default(),
                 alt_allele: row.get(3).unwrap_or_default(),
                 maf: row.get(4).unwrap_or(0.0),
                 gene_name: row.get(5).unwrap_or_default(),
-                region_type: row.get(6).unwrap_or_default(),
-                consequence: row.get(7).unwrap_or_default(),
-                cadd_phred: row.get(8).unwrap_or(0.0),
-                revel: row.get(9).unwrap_or(0.0),
-                annotation_weights: weights,
-                is_cage_promoter: row.get::<_, bool>(10).unwrap_or(false),
-                is_cage_enhancer: row.get::<_, bool>(11).unwrap_or(false),
-                is_ccre_promoter: row.get::<_, bool>(12).unwrap_or(false),
-                is_ccre_enhancer: row.get::<_, bool>(13).unwrap_or(false),
+                annotation: FunctionalAnnotation {
+                    region_type: row.get(6).unwrap_or_default(),
+                    consequence: row.get(7).unwrap_or_default(),
+                    cadd_phred: row.get(8).unwrap_or(0.0),
+                    revel: row.get(9).unwrap_or(0.0),
+                    regulatory: RegulatoryFlags {
+                        cage_promoter: row.get::<_, bool>(10).unwrap_or(false),
+                        cage_enhancer: row.get::<_, bool>(11).unwrap_or(false),
+                        ccre_promoter: row.get::<_, bool>(12).unwrap_or(false),
+                        ccre_enhancer: row.get::<_, bool>(13).unwrap_or(false),
+                    },
+                    weights: AnnotationWeights(weights),
+                },
             });
         }
         variants
@@ -436,65 +492,62 @@ mod tests {
         let (_dir, _db, variants) = setup_rare_table();
         let v = variants.iter().find(|v| v.position == 15528164).unwrap();
         assert_eq!(v.gene_name, "OR11H1");
-        assert_eq!(v.region_type, "exonic");
-        assert_eq!(v.consequence, "stopgain");
-        assert!((v.cadd_phred - 23.7).abs() < 0.1);
-        assert!(!v.is_cage_promoter);
-        assert!(!v.is_cage_enhancer);
-        assert!(!v.is_ccre_promoter);
-        assert!(!v.is_ccre_enhancer);
+        assert_eq!(v.annotation.region_type, "exonic");
+        assert_eq!(v.annotation.consequence, "stopgain");
+        assert!((v.annotation.cadd_phred - 23.7).abs() < 0.1);
+        assert!(!v.annotation.regulatory.cage_promoter);
+        assert!(!v.annotation.regulatory.cage_enhancer);
+        assert!(!v.annotation.regulatory.ccre_promoter);
+        assert!(!v.annotation.regulatory.ccre_enhancer);
     }
 
     #[test]
     fn extraction_splice_has_empty_consequence() {
         let (_dir, _db, variants) = setup_rare_table();
-        let v = variants.iter().find(|v| v.region_type == "splicing").unwrap();
-        assert_eq!(v.consequence, "");
-        assert!((v.cadd_phred - 25.1).abs() < 0.1);
+        let v = variants.iter().find(|v| v.annotation.region_type == "splicing").unwrap();
+        assert_eq!(v.annotation.consequence, "");
+        assert!((v.annotation.cadd_phred - 25.1).abs() < 0.1);
     }
 
     #[test]
     fn extraction_cage_flags() {
         let (_dir, _db, variants) = setup_rare_table();
         let prom = variants.iter().find(|v| v.position == 15526000).unwrap();
-        assert!(prom.is_cage_promoter);
-        assert!(!prom.is_cage_enhancer);
+        assert!(prom.annotation.regulatory.cage_promoter);
+        assert!(!prom.annotation.regulatory.cage_enhancer);
 
         let enh = variants.iter().find(|v| v.position == 15525000).unwrap();
-        assert!(!enh.is_cage_promoter);
-        assert!(enh.is_cage_enhancer);
+        assert!(!enh.annotation.regulatory.cage_promoter);
+        assert!(enh.annotation.regulatory.cage_enhancer);
     }
 
     #[test]
     fn extraction_ccre_flags() {
         let (_dir, _db, variants) = setup_rare_table();
         let pls = variants.iter().find(|v| v.position == 15524000).unwrap();
-        assert!(pls.is_ccre_promoter);
-        assert!(!pls.is_ccre_enhancer);
+        assert!(pls.annotation.regulatory.ccre_promoter);
+        assert!(!pls.annotation.regulatory.ccre_enhancer);
 
         let els = variants.iter().find(|v| v.position == 15523000).unwrap();
-        assert!(!els.is_ccre_promoter);
-        assert!(els.is_ccre_enhancer);
+        assert!(!els.annotation.regulatory.ccre_promoter);
+        assert!(els.annotation.regulatory.ccre_enhancer);
     }
 
     #[test]
     fn extraction_null_cage_is_false() {
         let (_dir, _db, variants) = setup_rare_table();
-        let intronic = variants.iter().find(|v| v.region_type == "intronic").unwrap();
-        assert!(!intronic.is_cage_promoter);
-        assert!(!intronic.is_cage_enhancer);
+        let intronic = variants.iter().find(|v| v.annotation.region_type == "intronic").unwrap();
+        assert!(!intronic.annotation.regulatory.cage_promoter);
+        assert!(!intronic.annotation.regulatory.cage_enhancer);
     }
 
     #[test]
     fn extraction_annotation_weights_nonzero() {
         let (_dir, _db, variants) = setup_rare_table();
-        let v = variants.iter().find(|v| v.consequence == "stopgain").unwrap();
-        assert!(v.annotation_weights.len() == 11);
-        assert!(v.annotation_weights[0] > 0.99); // cadd weight for phred=23.7
-        assert!(v.annotation_weights[1] > 0.0);  // linsight
+        let v = variants.iter().find(|v| v.annotation.consequence == "stopgain").unwrap();
+        assert!(v.annotation.weights.0[0] > 0.99); // cadd weight for phred=23.7
+        assert!(v.annotation.weights.0[1] > 0.0);  // linsight
     }
-
-    // -- mask predicates on extracted variants --
 
     #[test]
     fn coding_masks_on_extracted() {
@@ -510,7 +563,7 @@ mod tests {
         let ptv = coding.iter().find(|(mt, _)| *mt == MaskType::Ptv).unwrap();
         for group in &ptv.1 {
             for &idx in &group.variant_indices {
-                let csq = &variants[idx].consequence;
+                let csq = &variants[idx].annotation.consequence;
                 assert!(csq == "stopgain" || csq.starts_with("frameshift"),
                     "ptv should not include: {csq}");
             }
@@ -539,7 +592,7 @@ mod tests {
     #[test]
     fn intronic_in_no_mask() {
         let (_dir, _db, variants) = setup_rare_table();
-        let intronic_idx = variants.iter().position(|v| v.region_type == "intronic").unwrap();
+        let intronic_idx = variants.iter().position(|v| v.annotation.region_type == "intronic").unwrap();
 
         let coding = masks::build_coding_masks(&variants, 1);
         let noncoding = masks::build_noncoding_masks(&variants, 1);

@@ -1,8 +1,8 @@
 use faer::Mat;
 
-use super::cauchy;
 use super::null_model::NullModel;
-use super::score_test::{self, StaarResult};
+use super::score::{self, StaarResult};
+use super::stats;
 
 /// Multi-trait joint testing: run STAAR independently per trait, then
 /// aggregate p-values across traits via Cauchy combination.
@@ -23,10 +23,6 @@ pub struct MultiStaarResult {
     pub multi_staar_o: f64,
     /// Cross-trait Burden omnibus: Cauchy of per-trait STAAR-B(1,25).
     pub multi_burden: f64,
-    /// Cross-trait SKAT omnibus: Cauchy of per-trait STAAR-S(1,25).
-    pub multi_skat: f64,
-    /// Cross-trait ACAT-V omnibus: Cauchy of per-trait STAAR-A(1,25).
-    pub multi_acat_v: f64,
 }
 
 /// Run MultiSTAAR for one gene across multiple traits.
@@ -42,20 +38,16 @@ pub fn run_multi_staar(
 ) -> MultiStaarResult {
     let per_trait: Vec<StaarResult> = null_models
         .iter()
-        .map(|null| score_test::run_staar(g, annotation_matrix, mafs, null, use_spa))
+        .map(|null| score::run_staar(g, annotation_matrix, mafs, null, use_spa))
         .collect();
 
     let staar_o_pvals: Vec<f64> = per_trait.iter().map(|r| r.staar_o).collect();
     let burden_pvals: Vec<f64> = per_trait.iter().map(|r| r.staar_b_1_25).collect();
-    let skat_pvals: Vec<f64> = per_trait.iter().map(|r| r.staar_s_1_25).collect();
-    let acat_v_pvals: Vec<f64> = per_trait.iter().map(|r| r.staar_a_1_25).collect();
 
     MultiStaarResult {
         per_trait,
-        multi_staar_o: cauchy::cauchy_combine(&staar_o_pvals),
-        multi_burden: cauchy::cauchy_combine(&burden_pvals),
-        multi_skat: cauchy::cauchy_combine(&skat_pvals),
-        multi_acat_v: cauchy::cauchy_combine(&acat_v_pvals),
+        multi_staar_o: stats::cauchy_combine(&staar_o_pvals),
+        multi_burden: stats::cauchy_combine(&burden_pvals),
     }
 }
 
@@ -106,8 +98,6 @@ mod tests {
         assert_eq!(result.per_trait.len(), 2);
         assert!(result.multi_staar_o >= 0.0 && result.multi_staar_o <= 1.0);
         assert!(result.multi_burden >= 0.0 && result.multi_burden <= 1.0);
-        assert!(result.multi_skat >= 0.0 && result.multi_skat <= 1.0);
-        assert!(result.multi_acat_v >= 0.0 && result.multi_acat_v <= 1.0);
     }
 
     #[test]
@@ -121,7 +111,7 @@ mod tests {
         };
 
         let null = null_model::fit_glm(&y1, &x);
-        let single = score_test::run_staar(&g, &ann, &mafs, &null, false);
+        let single = score::run_staar(&g, &ann, &mafs, &null, false);
         let multi = run_multi_staar(&g, &ann, &mafs, &[&null], false);
 
         assert!((single.staar_o - multi.per_trait[0].staar_o).abs() < 1e-12);

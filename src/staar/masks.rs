@@ -1,4 +1,5 @@
 use super::MaskType;
+use crate::types::AnnotatedVariant;
 
 pub const PLOF_CONSEQUENCES: &[&str] = &[
     "stopgain",
@@ -29,25 +30,6 @@ const SPLICE_CONSEQUENCES: &[&str] = &[
     "splice_donor_variant",
     "splice_acceptor_variant",
 ];
-
-#[derive(Debug, Clone)]
-pub struct AnnotatedVariant {
-    pub chromosome: String,
-    pub position: u32,
-    pub ref_allele: String,
-    pub alt_allele: String,
-    pub maf: f64,
-    pub gene_name: String,
-    pub region_type: String,
-    pub consequence: String,
-    pub cadd_phred: f64,
-    pub revel: f64,
-    pub annotation_weights: Vec<f64>,
-    pub is_cage_promoter: bool,
-    pub is_cage_enhancer: bool,
-    pub is_ccre_promoter: bool,
-    pub is_ccre_enhancer: bool,
-}
 
 #[derive(Debug)]
 pub struct MaskGroup {
@@ -80,16 +62,16 @@ pub const NONCODING_MASKS: &[(MaskType, fn(&AnnotatedVariant) -> bool)] = &[
 ];
 
 fn is_plof(v: &AnnotatedVariant) -> bool {
-    PLOF_CONSEQUENCES.contains(&v.consequence.as_str())
-        || v.region_type == "splicing"
+    PLOF_CONSEQUENCES.contains(&v.annotation.consequence.as_str())
+        || v.annotation.region_type == "splicing"
 }
 
 fn is_missense(v: &AnnotatedVariant) -> bool {
-    v.consequence == "missense_variant" || v.consequence == "nonsynonymous SNV"
+    v.annotation.consequence == "missense_variant" || v.annotation.consequence == "nonsynonymous SNV"
 }
 
 fn is_disruptive_missense(v: &AnnotatedVariant) -> bool {
-    is_missense(v) && (v.cadd_phred > 20.0 || v.revel > 0.5)
+    is_missense(v) && (v.annotation.cadd_phred > 20.0 || v.annotation.revel > 0.5)
 }
 
 fn is_plof_or_missense(v: &AnnotatedVariant) -> bool {
@@ -97,57 +79,57 @@ fn is_plof_or_missense(v: &AnnotatedVariant) -> bool {
 }
 
 fn is_synonymous(v: &AnnotatedVariant) -> bool {
-    v.consequence == "synonymous_variant" || v.consequence == "synonymous SNV"
+    v.annotation.consequence == "synonymous_variant" || v.annotation.consequence == "synonymous SNV"
 }
 
 fn is_ptv(v: &AnnotatedVariant) -> bool {
-    PTV_CONSEQUENCES.contains(&v.consequence.as_str())
+    PTV_CONSEQUENCES.contains(&v.annotation.consequence.as_str())
 }
 
 fn is_ptv_ds(v: &AnnotatedVariant) -> bool {
-    is_ptv(v) || (is_splice(v) && v.cadd_phred > 20.0)
+    is_ptv(v) || (is_splice(v) && v.annotation.cadd_phred > 20.0)
 }
 
 fn is_splice(v: &AnnotatedVariant) -> bool {
-    v.region_type == "splicing"
-        || SPLICE_CONSEQUENCES.contains(&v.consequence.as_str())
+    v.annotation.region_type == "splicing"
+        || SPLICE_CONSEQUENCES.contains(&v.annotation.consequence.as_str())
 }
 
 fn is_upstream(v: &AnnotatedVariant) -> bool {
-    v.region_type.contains("upstream") || v.consequence == "upstream_gene_variant"
+    v.annotation.region_type.contains("upstream") || v.annotation.consequence == "upstream_gene_variant"
 }
 
 fn is_downstream(v: &AnnotatedVariant) -> bool {
-    v.region_type.contains("downstream") || v.consequence == "downstream_gene_variant"
+    v.annotation.region_type.contains("downstream") || v.annotation.consequence == "downstream_gene_variant"
 }
 
 fn is_utr(v: &AnnotatedVariant) -> bool {
-    v.region_type.contains("UTR") || matches!(
-        v.consequence.as_str(),
+    v.annotation.region_type.contains("UTR") || matches!(
+        v.annotation.consequence.as_str(),
         "5_prime_UTR_variant" | "3_prime_UTR_variant"
     )
 }
 
 fn is_promoter_cage(v: &AnnotatedVariant) -> bool {
-    v.is_cage_promoter
+    v.annotation.regulatory.cage_promoter
 }
 
 fn is_promoter_dhs(v: &AnnotatedVariant) -> bool {
-    v.is_ccre_promoter
+    v.annotation.regulatory.ccre_promoter
 }
 
 fn is_enhancer_cage(v: &AnnotatedVariant) -> bool {
-    v.is_cage_enhancer
+    v.annotation.regulatory.cage_enhancer
 }
 
 fn is_enhancer_dhs(v: &AnnotatedVariant) -> bool {
-    v.is_ccre_enhancer
+    v.annotation.regulatory.ccre_enhancer
 }
 
 fn is_ncrna(v: &AnnotatedVariant) -> bool {
-    v.region_type.contains("ncRNA")
-        || v.consequence == "non_coding_transcript_exon_variant"
-        || v.consequence == "non_coding_transcript_variant"
+    v.annotation.region_type.contains("ncRNA")
+        || v.annotation.consequence == "non_coding_transcript_exon_variant"
+        || v.annotation.consequence == "non_coding_transcript_variant"
 }
 
 pub fn build_masks_from_registry(
@@ -181,7 +163,7 @@ pub fn build_masks_from_registry(
                         matching.iter().map(|&i| variants[i].position).collect();
                     Some(MaskGroup {
                         name: gene.clone(),
-                        chromosome: variants[matching[0]].chromosome.clone(),
+                        chromosome: variants[matching[0]].chromosome.to_string(),
                         start: positions.iter().copied().min().unwrap_or(0),
                         end: positions.iter().copied().max().unwrap_or(0),
                         variant_indices: matching,
@@ -210,15 +192,20 @@ pub fn build_noncoding_masks(
 #[cfg(test)]
 fn v(region_type: &str, consequence: &str, cadd: f64, revel: f64,
      cage_prom: bool, cage_enh: bool, ccre_prom: bool, ccre_enh: bool) -> AnnotatedVariant {
+    use crate::types::{AnnotationWeights, FunctionalAnnotation, RegulatoryFlags, Chromosome};
     AnnotatedVariant {
-        chromosome: "22".into(), position: 1000,
+        chromosome: Chromosome::Autosome(22), position: 1000,
         ref_allele: "A".into(), alt_allele: "T".into(),
         maf: 0.001, gene_name: "BRCA2".into(),
-        region_type: region_type.into(), consequence: consequence.into(),
-        cadd_phred: cadd, revel,
-        annotation_weights: vec![0.0; 11],
-        is_cage_promoter: cage_prom, is_cage_enhancer: cage_enh,
-        is_ccre_promoter: ccre_prom, is_ccre_enhancer: ccre_enh,
+        annotation: FunctionalAnnotation {
+            region_type: region_type.into(), consequence: consequence.into(),
+            cadd_phred: cadd, revel,
+            weights: AnnotationWeights([0.0; 11]),
+            regulatory: RegulatoryFlags {
+                cage_promoter: cage_prom, cage_enhancer: cage_enh,
+                ccre_promoter: ccre_prom, ccre_enhancer: ccre_enh,
+            },
+        },
     }
 }
 
@@ -248,11 +235,10 @@ mod tests {
 
     #[test]
     fn splice_region_type_is_plof_not_ptv() {
-        // FAVOR puts "splicing" in region_type, consequence is empty
         let var = v("splicing", "", 25.1, 0.0, false, false, false, false);
         assert!(is_plof(&var));
         assert!(!is_ptv(&var));
-        assert!(is_ptv_ds(&var)); // splice with cadd > 20
+        assert!(is_ptv_ds(&var));
         assert!(is_splice(&var));
     }
 
@@ -421,10 +407,6 @@ mod tests {
         }).collect();
         let indices: Vec<usize> = (0..5).collect();
         let windows = build_sliding_windows(&variants, &indices, "22", 1000, 1000);
-        // positions: 0, 500, 1000, 1500, 2000
-        // window [0,1000): 0, 500 → 2 variants ✓
-        // window [1000,2000): 1000, 1500 → 2 variants ✓
-        // window [2000,3000): 2000 → 1 variant, skipped
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].variant_indices.len(), 2);
         assert_eq!(windows[1].variant_indices.len(), 2);
@@ -453,6 +435,115 @@ mod tests {
         assert!(is_ptv_ds(&var));
         assert!(!is_ptv(&var));
     }
+
+    // -- SCANG tests --
+
+    fn var_at(pos: u32) -> AnnotatedVariant {
+        use crate::types::{AnnotationWeights, Chromosome, FunctionalAnnotation, RegulatoryFlags};
+        AnnotatedVariant {
+            chromosome: Chromosome::Autosome(1),
+            position: pos,
+            ref_allele: "A".into(),
+            alt_allele: "T".into(),
+            maf: 0.005,
+            gene_name: String::new(),
+            annotation: FunctionalAnnotation {
+                region_type: String::new(),
+                consequence: String::new(),
+                cadd_phred: 10.0,
+                revel: 0.0,
+                weights: AnnotationWeights([0.5; 11]),
+                regulatory: RegulatoryFlags::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn scang_windows_basic() {
+        let variants: Vec<AnnotatedVariant> = (0..100).map(|i| var_at(i * 100)).collect();
+        let indices: Vec<usize> = (0..100).collect();
+        let params = ScangParams { lmin: 10, lmax: 30, step: 10 };
+        let result = build_scang_windows(&variants, &indices, "1", &params);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, 10);
+        assert_eq!(result[1].0, 20);
+        assert_eq!(result[2].0, 30);
+
+        assert_eq!(result[0].1.len(), 91);
+        assert_eq!(result[1].1.len(), 81);
+        assert_eq!(result[2].1.len(), 71);
+    }
+
+    #[test]
+    fn scang_too_few_variants() {
+        let variants: Vec<AnnotatedVariant> = (0..5).map(|i| var_at(i * 100)).collect();
+        let indices: Vec<usize> = (0..5).collect();
+        let params = ScangParams::default();
+        let result = build_scang_windows(&variants, &indices, "1", &params);
+        assert!(result.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCANG: data-adaptive variable-size scanning windows (formerly scang.rs)
+// ---------------------------------------------------------------------------
+
+/// SCANG parameters: data-adaptive variable-size scanning windows.
+pub struct ScangParams {
+    pub lmin: usize,
+    pub lmax: usize,
+    pub step: usize,
+}
+
+impl Default for ScangParams {
+    fn default() -> Self {
+        Self { lmin: 40, lmax: 300, step: 10 }
+    }
+}
+
+/// Build SCANG window groups across multiple variant-count sizes.
+///
+/// Returns `(window_length_variants, groups)` for each tested size.
+/// Windows slide by 1 variant position for maximum resolution.
+pub fn build_scang_windows(
+    variants: &[AnnotatedVariant],
+    chrom_indices: &[usize],
+    chromosome: &str,
+    params: &ScangParams,
+) -> Vec<(u32, Vec<MaskGroup>)> {
+    let n = chrom_indices.len();
+    if n < params.lmin {
+        return Vec::new();
+    }
+
+    let lmax = params.lmax.min(n);
+    let mut result = Vec::new();
+
+    let mut wsize = params.lmin;
+    while wsize <= lmax {
+        let mut groups = Vec::new();
+
+        for start in 0..=(n - wsize) {
+            let window_indices: Vec<usize> =
+                chrom_indices[start..start + wsize].to_vec();
+            let first_pos = variants[window_indices[0]].position;
+            let last_pos = variants[*window_indices.last().unwrap()].position;
+
+            groups.push(MaskGroup {
+                name: format!("scang_L{}_{chromosome}:{first_pos}-{last_pos}", wsize),
+                chromosome: chromosome.to_string(),
+                start: first_pos,
+                end: last_pos,
+                variant_indices: window_indices,
+            });
+        }
+
+        result.push((wsize as u32, groups));
+        wsize += params.step;
+    }
+
+    result
 }
 
 pub fn build_sliding_windows(

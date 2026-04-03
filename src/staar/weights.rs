@@ -1,21 +1,5 @@
 use statrs::distribution::{Beta, Continuous};
 
-/// The annotation channels STAAR uses as variant weights.
-/// Matches STAARpipeline exactly.
-pub const ANNOTATION_CHANNELS: &[&str] = &[
-    "cadd_phred",
-    "linsight",
-    "fathmm_xf",
-    "apc_epigenetics_active",
-    "apc_epigenetics_repressed",
-    "apc_epigenetics_transcription",
-    "apc_conservation",
-    "apc_protein_function",
-    "apc_local_nucleotide_diversity",
-    "apc_mutation_density",
-    "apc_transcription_factor",
-];
-
 /// Beta density weight: dbeta(maf, a1, a2).
 ///
 /// For beta(1,25): upweights ultra-rare variants (MAF near 0).

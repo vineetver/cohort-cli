@@ -20,7 +20,7 @@ use parquet::file::properties::WriterProperties;
 
 use crate::error::FavorError;
 use crate::output::Output;
-use crate::variant_set::VariantSetWriter;
+use crate::data::VariantSetWriter;
 
 /// Bytes per variant in a batch: 7 columns × ~20 bytes average.
 const BYTES_PER_VARIANT: u64 = 140;

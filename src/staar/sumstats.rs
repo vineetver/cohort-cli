@@ -14,16 +14,14 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
 use super::genotype::GenotypeResult;
-use super::masks::AnnotatedVariant;
 use super::null_model::NullModel;
-use crate::db::engine::DuckEngine;
-use crate::db::query::query_strings;
+use crate::db::DuckEngine;
+use crate::db::query_strings;
 use crate::error::FavorError;
 use crate::output::Output;
+use crate::types::{AnnotatedVariant, AnnotationWeights};
 
 const SEGMENT_BP: u32 = 500_000;
-// Cap variants per segment to bound memory: m*m covariance + n*m genotype matrix.
-// 2000 variants * 2000 = 32MB covariance, + 50K*2000 = 800MB genotypes. Manageable.
 const MAX_SEGMENT_VARIANTS: usize = 2000;
 
 #[derive(Serialize, Deserialize)]
@@ -41,11 +39,7 @@ pub struct StudyMeta {
 /// Export MetaSTAAR summary statistics for all chromosomes.
 ///
 /// Matches R MetaSTAAR scaling: both score vector and covariance are divided
-/// by the null model dispersion sigma squared. This gives correct inverse-variance
-/// weighting when meta-analyzing studies with different residual variances.
-///   U_scaled = G'r / sigma^2
-///   Cov_scaled = G'PG / sigma^2
-/// For binary traits sigma^2=1, so the division is identity.
+/// by the null model dispersion sigma squared.
 pub fn emit(
     engine: &DuckEngine,
     geno: &GenotypeResult,
@@ -64,7 +58,7 @@ pub fn emit(
         let indices: Vec<usize> = variants
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.chromosome == *chrom)
+            .filter(|(_, v)| v.chromosome.to_string() == format!("chr{chrom}") || v.chromosome.to_string() == *chrom)
             .map(|(i, _)| i)
             .collect();
         if indices.is_empty() {
@@ -95,9 +89,6 @@ fn emit_chromosome(
     dir: &Path,
     out: &dyn Output,
 ) -> Result<(), FavorError> {
-    // Partition variants into 500kb segments, then split oversized ones.
-    // Cross-sub-segment covariance is zero — acceptable since rare variant LD
-    // decays well within the sub-segment span.
     let mut coarse: std::collections::BTreeMap<i32, Vec<usize>> =
         std::collections::BTreeMap::new();
     for &gi in chrom_indices {
@@ -127,16 +118,15 @@ fn emit_chromosome(
     let inv_s2 = 1.0 / null.sigma2;
 
     let chrom_positions: Vec<u32> = chrom_indices.iter().map(|&i| variants[i].position).collect();
-    let extract_cols = super::geno_load::dosage_columns(n);
+    let extract_cols = super::genotype::dosage_columns(n);
     let geno_flat =
-        super::geno_load::load(engine, &geno_path, &chrom_positions, n, &extract_cols)?;
+        super::genotype::load(engine, &geno_path, &chrom_positions, n, &extract_cols)?;
     let pos_to_flat: std::collections::HashMap<u32, usize> = chrom_positions
         .iter()
         .enumerate()
         .map(|(local, &p)| (p, local))
         .collect();
 
-    // Builders for variants.parquet — accumulate all segments for this chromosome
     let total_variants = chrom_indices.len();
     let mut b_position = Int32Builder::with_capacity(total_variants);
     let mut b_ref = StringBuilder::with_capacity(total_variants, total_variants * 4);
@@ -156,19 +146,8 @@ fn emit_chromosome(
     let mut b_cage_enh = BooleanBuilder::with_capacity(total_variants);
     let mut b_ccre_prom = BooleanBuilder::with_capacity(total_variants);
     let mut b_ccre_enh = BooleanBuilder::with_capacity(total_variants);
-    let mut b_w_cadd = Float64Builder::with_capacity(total_variants);
-    let mut b_w_linsight = Float64Builder::with_capacity(total_variants);
-    let mut b_w_fathmm_xf = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_epi_active = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_epi_repressed = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_epi_transcription = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_conservation = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_protein_function = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_local_nd = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_mutation_density = Float64Builder::with_capacity(total_variants);
-    let mut b_w_apc_tf = Float64Builder::with_capacity(total_variants);
+    let mut b_weights: [Float64Builder; 11] = std::array::from_fn(|_| Float64Builder::with_capacity(total_variants));
 
-    // Builders for segments.parquet
     let n_segments = segments.len();
     let mut s_segment_id = Int32Builder::with_capacity(n_segments);
     let mut s_n_variants = Int32Builder::with_capacity(n_segments);
@@ -197,7 +176,6 @@ fn emit_chromosome(
         let pg = null.project(&g);
         let k = g.transpose() * &pg;
 
-        // Variant-level summary stats
         for (j, &gi) in seg_indices.iter().enumerate() {
             let v = &variants[gi];
             b_position.append_value(v.position as i32);
@@ -210,29 +188,19 @@ fn emit_chromosome(
             b_v_stat.append_value(k[(j, j)] * inv_s2);
             b_segment_id.append_value(seg_id);
             b_gene.append_value(&v.gene_name);
-            b_region.append_value(&v.region_type);
-            b_consequence.append_value(&v.consequence);
-            b_cadd.append_value(v.cadd_phred);
-            b_revel.append_value(v.revel);
-            b_cage_prom.append_value(v.is_cage_promoter);
-            b_cage_enh.append_value(v.is_cage_enhancer);
-            b_ccre_prom.append_value(v.is_ccre_promoter);
-            b_ccre_enh.append_value(v.is_ccre_enhancer);
-            let w = &v.annotation_weights;
-            b_w_cadd.append_value(w.get(0).copied().unwrap_or(0.0));
-            b_w_linsight.append_value(w.get(1).copied().unwrap_or(0.0));
-            b_w_fathmm_xf.append_value(w.get(2).copied().unwrap_or(0.0));
-            b_w_apc_epi_active.append_value(w.get(3).copied().unwrap_or(0.0));
-            b_w_apc_epi_repressed.append_value(w.get(4).copied().unwrap_or(0.0));
-            b_w_apc_epi_transcription.append_value(w.get(5).copied().unwrap_or(0.0));
-            b_w_apc_conservation.append_value(w.get(6).copied().unwrap_or(0.0));
-            b_w_apc_protein_function.append_value(w.get(7).copied().unwrap_or(0.0));
-            b_w_apc_local_nd.append_value(w.get(8).copied().unwrap_or(0.0));
-            b_w_apc_mutation_density.append_value(w.get(9).copied().unwrap_or(0.0));
-            b_w_apc_tf.append_value(w.get(10).copied().unwrap_or(0.0));
+            b_region.append_value(&v.annotation.region_type);
+            b_consequence.append_value(&v.annotation.consequence);
+            b_cadd.append_value(v.annotation.cadd_phred);
+            b_revel.append_value(v.annotation.revel);
+            b_cage_prom.append_value(v.annotation.regulatory.cage_promoter);
+            b_cage_enh.append_value(v.annotation.regulatory.cage_enhancer);
+            b_ccre_prom.append_value(v.annotation.regulatory.ccre_promoter);
+            b_ccre_enh.append_value(v.annotation.regulatory.ccre_enhancer);
+            for (i, builder) in b_weights.iter_mut().enumerate() {
+                builder.append_value(v.annotation.weights.0[i]);
+            }
         }
 
-        // Segment covariance: lower-triangle of K / sigma^2
         s_segment_id.append_value(seg_id);
         s_n_variants.append_value(m as i32);
 
@@ -265,35 +233,12 @@ fn emit_chromosome(
 
     write_variants_parquet(
         dir,
-        &mut b_position,
-        &mut b_ref,
-        &mut b_alt,
-        &mut b_maf,
-        &mut b_mac,
-        &mut b_n_obs,
-        &mut b_u_stat,
-        &mut b_v_stat,
-        &mut b_segment_id,
-        &mut b_gene,
-        &mut b_region,
-        &mut b_consequence,
-        &mut b_cadd,
-        &mut b_revel,
-        &mut b_cage_prom,
-        &mut b_cage_enh,
-        &mut b_ccre_prom,
-        &mut b_ccre_enh,
-        &mut b_w_cadd,
-        &mut b_w_linsight,
-        &mut b_w_fathmm_xf,
-        &mut b_w_apc_epi_active,
-        &mut b_w_apc_epi_repressed,
-        &mut b_w_apc_epi_transcription,
-        &mut b_w_apc_conservation,
-        &mut b_w_apc_protein_function,
-        &mut b_w_apc_local_nd,
-        &mut b_w_apc_mutation_density,
-        &mut b_w_apc_tf,
+        &mut b_position, &mut b_ref, &mut b_alt, &mut b_maf, &mut b_mac,
+        &mut b_n_obs, &mut b_u_stat, &mut b_v_stat, &mut b_segment_id,
+        &mut b_gene, &mut b_region, &mut b_consequence,
+        &mut b_cadd, &mut b_revel,
+        &mut b_cage_prom, &mut b_cage_enh, &mut b_ccre_prom, &mut b_ccre_enh,
+        &mut b_weights,
     )?;
 
     write_segments_parquet(
@@ -311,7 +256,7 @@ fn emit_chromosome(
 }
 
 fn variant_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = vec![
         Field::new("position", DataType::Int32, false),
         Field::new("ref_allele", DataType::Utf8, false),
         Field::new("alt_allele", DataType::Utf8, false),
@@ -330,18 +275,11 @@ fn variant_schema() -> Schema {
         Field::new("is_cage_enhancer", DataType::Boolean, false),
         Field::new("is_ccre_promoter", DataType::Boolean, false),
         Field::new("is_ccre_enhancer", DataType::Boolean, false),
-        Field::new("w_cadd", DataType::Float64, false),
-        Field::new("w_linsight", DataType::Float64, false),
-        Field::new("w_fathmm_xf", DataType::Float64, false),
-        Field::new("w_apc_epi_active", DataType::Float64, false),
-        Field::new("w_apc_epi_repressed", DataType::Float64, false),
-        Field::new("w_apc_epi_transcription", DataType::Float64, false),
-        Field::new("w_apc_conservation", DataType::Float64, false),
-        Field::new("w_apc_protein_function", DataType::Float64, false),
-        Field::new("w_apc_local_nd", DataType::Float64, false),
-        Field::new("w_apc_mutation_density", DataType::Float64, false),
-        Field::new("w_apc_tf", DataType::Float64, false),
-    ])
+    ];
+    for name in AnnotationWeights::NAMES {
+        fields.push(Field::new(name, DataType::Float64, false));
+    }
+    Schema::new(fields)
 }
 
 fn segment_schema() -> Schema {
@@ -378,7 +316,6 @@ fn parquet_props() -> WriterProperties {
         .build()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_variants_parquet(
     dir: &Path,
     b_position: &mut Int32Builder,
@@ -399,20 +336,10 @@ fn write_variants_parquet(
     b_cage_enh: &mut BooleanBuilder,
     b_ccre_prom: &mut BooleanBuilder,
     b_ccre_enh: &mut BooleanBuilder,
-    b_w_cadd: &mut Float64Builder,
-    b_w_linsight: &mut Float64Builder,
-    b_w_fathmm_xf: &mut Float64Builder,
-    b_w_apc_epi_active: &mut Float64Builder,
-    b_w_apc_epi_repressed: &mut Float64Builder,
-    b_w_apc_epi_transcription: &mut Float64Builder,
-    b_w_apc_conservation: &mut Float64Builder,
-    b_w_apc_protein_function: &mut Float64Builder,
-    b_w_apc_local_nd: &mut Float64Builder,
-    b_w_apc_mutation_density: &mut Float64Builder,
-    b_w_apc_tf: &mut Float64Builder,
+    b_weights: &mut [Float64Builder; 11],
 ) -> Result<(), FavorError> {
     let schema = Arc::new(variant_schema());
-    let columns: Vec<ArrayRef> = vec![
+    let mut columns: Vec<ArrayRef> = vec![
         Arc::new(b_position.finish()),
         Arc::new(b_ref.finish()),
         Arc::new(b_alt.finish()),
@@ -431,18 +358,10 @@ fn write_variants_parquet(
         Arc::new(b_cage_enh.finish()),
         Arc::new(b_ccre_prom.finish()),
         Arc::new(b_ccre_enh.finish()),
-        Arc::new(b_w_cadd.finish()),
-        Arc::new(b_w_linsight.finish()),
-        Arc::new(b_w_fathmm_xf.finish()),
-        Arc::new(b_w_apc_epi_active.finish()),
-        Arc::new(b_w_apc_epi_repressed.finish()),
-        Arc::new(b_w_apc_epi_transcription.finish()),
-        Arc::new(b_w_apc_conservation.finish()),
-        Arc::new(b_w_apc_protein_function.finish()),
-        Arc::new(b_w_apc_local_nd.finish()),
-        Arc::new(b_w_apc_mutation_density.finish()),
-        Arc::new(b_w_apc_tf.finish()),
     ];
+    for b in b_weights.iter_mut() {
+        columns.push(Arc::new(b.finish()));
+    }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| FavorError::Resource(format!("Arrow batch: {e}")))?;

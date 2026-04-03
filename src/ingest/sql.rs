@@ -8,7 +8,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use super::{Analysis, BuildGuess, CoordBase, Delimiter, InputFormat};
-use super::columns::canonical_type;
+use super::canonical_type;
 use crate::resource::Resources;
 
 /// Generate a complete DuckDB SQL script from an Analysis.

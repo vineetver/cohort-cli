@@ -144,22 +144,6 @@ impl AnnotationWeights {
         "apc_transcription_factor",
     ];
 
-    /// Apply learned priors from the feedback loop.
-    ///
-    /// Multiplies each channel weight by the corresponding prior.
-    /// Priors default to `[1.0; 11]` (uniform — no adjustment).
-    pub fn with_priors(&self, priors: &[f64; 11]) -> Self {
-        let mut out = self.0;
-        for i in 0..11 {
-            out[i] *= priors[i];
-        }
-        Self(out)
-    }
-
-    /// Iterator over (column_name, value) pairs — for parquet / SQL generation.
-    pub fn named_values(&self) -> impl Iterator<Item = (&'static str, f64)> + '_ {
-        Self::NAMES.iter().zip(self.0.iter()).map(|(n, &v)| (*n, v))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,31 +298,6 @@ mod tests {
         assert_eq!(AnnotationWeights::DISPLAY_NAMES.len(), 11);
     }
 
-    #[test]
-    fn with_priors_uniform() {
-        let w = AnnotationWeights([1.0; 11]);
-        let out = w.with_priors(&[1.0; 11]);
-        assert_eq!(out.0, [1.0; 11]);
-    }
-
-    #[test]
-    fn with_priors_scales() {
-        let w = AnnotationWeights([2.0; 11]);
-        let mut priors = [1.0; 11];
-        priors[0] = 0.5;
-        let out = w.with_priors(&priors);
-        assert!((out.0[0] - 1.0).abs() < 1e-10);
-        assert!((out.0[1] - 2.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn named_values_matches() {
-        let w = AnnotationWeights([0.0; 11]);
-        let pairs: Vec<_> = w.named_values().collect();
-        assert_eq!(pairs.len(), 11);
-        assert_eq!(pairs[0].0, "w_cadd");
-        assert_eq!(pairs[10].0, "w_apc_tf");
-    }
 
     // -- Display names match existing ANNOTATION_CHANNELS -------------------
 

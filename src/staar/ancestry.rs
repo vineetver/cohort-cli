@@ -1,8 +1,8 @@
 use faer::Mat;
 
-use super::cauchy;
 use super::null_model::NullModel;
-use super::score_test::{self, StaarResult};
+use super::score::{self, StaarResult};
+use super::stats;
 
 /// Ancestry-informed STAAR: uses population-specific allele frequencies
 /// as weights to leverage allelic heterogeneity across ancestries.
@@ -43,7 +43,7 @@ pub fn run_ai_staar(
 
     if m == 0 || n_pops == 0 {
         let zero_mafs = vec![0.01; m];
-        return score_test::run_staar(g, annotation_matrix, &zero_mafs, null, use_spa);
+        return score::run_staar(g, annotation_matrix, &zero_mafs, null, use_spa);
     }
 
     // Population sample counts for weighted pooling
@@ -65,7 +65,7 @@ pub fn run_ai_staar(
         let pop_mafs_p: Vec<f64> = pop_mafs.iter()
             .map(|v| v.get(p).copied().unwrap_or(0.01).clamp(1e-10, 0.499))
             .collect();
-        scenario1_results.push(score_test::run_staar(
+        scenario1_results.push(score::run_staar(
             &g_pop, annotation_matrix, &pop_mafs_p, null, use_spa,
         ));
     }
@@ -81,15 +81,15 @@ pub fn run_ai_staar(
             (weighted / total_n).clamp(1e-10, 0.499)
         })
         .collect();
-    let scenario2 = score_test::run_staar(g, annotation_matrix, &pooled_mafs, null, use_spa);
+    let scenario2 = score::run_staar(g, annotation_matrix, &pooled_mafs, null, use_spa);
 
     // Combine: Cauchy across all scenarios' STAAR-O values
     let mut all_staar_o: Vec<f64> = scenario1_results.iter().map(|r| r.staar_o).collect();
     all_staar_o.push(scenario2.staar_o);
 
     let mut combined = scenario2;
-    combined.staar_o = cauchy::cauchy_combine(&all_staar_o);
-    combined.acat_o = cauchy::cauchy_combine(
+    combined.staar_o = stats::cauchy_combine(&all_staar_o);
+    combined.acat_o = stats::cauchy_combine(
         &scenario1_results
             .iter()
             .map(|r| r.acat_o)

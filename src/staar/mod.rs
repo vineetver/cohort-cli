@@ -1,15 +1,13 @@
 pub mod ancestry;
-pub mod cauchy;
-pub mod geno_load;
 pub mod genotype;
 pub mod masks;
 pub mod meta;
 pub mod multi;
 pub mod null_model;
-pub mod scang;
-pub mod score_test;
-pub mod skat_pval;
-pub mod spa;
+pub mod phenotype;
+pub mod results;
+pub mod score;
+pub mod stats;
 pub mod summary;
 pub mod sumstats;
 pub mod weights;
@@ -62,7 +60,6 @@ pub enum MaskType {
     Ncrna,
     SlidingWindow,
     Scang,
-    Custom { name: String },
 }
 
 impl MaskType {
@@ -85,7 +82,6 @@ impl MaskType {
             Self::Ncrna => "noncoding_ncRNA".into(),
             Self::SlidingWindow => "sliding_window".into(),
             Self::Scang => "scang".into(),
-            Self::Custom { name } => format!("custom_{name}"),
         }
     }
 }
@@ -99,6 +95,6 @@ pub struct GeneResult {
     pub end: u32,
     pub n_variants: u32,
     pub cumulative_mac: u32,
-    pub staar: score_test::StaarResult,
+    pub staar: score::StaarResult,
 }
 

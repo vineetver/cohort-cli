@@ -5,12 +5,16 @@ use arrow::array::{Array, AsArray, Float64Array, Int32Array, ListArray};
 use faer::Mat;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use super::masks::{AnnotatedVariant, MaskGroup};
-use super::score_test;
+use super::masks::MaskGroup;
+use super::score;
 use super::sumstats::StudyMeta;
 use super::GeneResult;
-use crate::db::engine::DuckEngine;
+use crate::db::DuckEngine;
 use crate::error::FavorError;
+use crate::types::{
+    AnnotatedVariant, AnnotationWeights, Chromosome, FunctionalAnnotation, MetaVariant,
+    RegulatoryFlags,
+};
 
 /// Load ALL segments for a (study, chromosome) by reading the parquet file directly.
 pub fn load_all_segments(
@@ -90,28 +94,6 @@ pub struct StudyHandle {
     pub meta: StudyMeta,
 }
 
-/// Merged variant from union of all studies.
-pub struct MetaVariant {
-    pub position: u32,
-    pub ref_allele: String,
-    pub alt_allele: String,
-    pub u_meta: f64,
-    pub mac_total: i64,
-    pub n_total: i64,
-    pub gene_name: String,
-    pub region_type: String,
-    pub consequence: String,
-    pub cadd_phred: f64,
-    pub revel: f64,
-    pub is_cage_promoter: bool,
-    pub is_cage_enhancer: bool,
-    pub is_ccre_promoter: bool,
-    pub is_ccre_enhancer: bool,
-    pub annotation_weights: Vec<f64>,
-    /// Which studies contributed, and their segment_ids
-    pub study_segments: Vec<(usize, i32)>,
-}
-
 /// Segment covariance read from one study.
 pub struct SegmentCov {
     refs: Vec<String>,
@@ -122,7 +104,6 @@ pub struct SegmentCov {
 
 impl SegmentCov {
     /// Extract sub-matrix for a subset of variants identified by (position, ref, alt).
-    /// Returns m_sub × m_sub dense matrix. Missing variants get zero rows/columns.
     fn extract_submatrix(&self, keys: &[(u32, &str, &str)]) -> Mat<f64> {
         let m = keys.len();
         let mut mat = Mat::zeros(m, m);
@@ -177,7 +158,6 @@ pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, Fa
         return Err(FavorError::Input("MetaSTAAR requires at least 2 studies.".into()));
     }
 
-    // Validate compatibility
     let first_type = &studies[0].meta.trait_type;
     let first_seg = studies[0].meta.segment_size;
     for s in &studies[1..] {
@@ -205,7 +185,6 @@ pub fn merge_chromosome(
     chrom: &str,
     maf_cutoff: f64,
 ) -> Result<Vec<MetaVariant>, FavorError> {
-    // Load all studies' variants for this chromosome into DuckDB
     let mut union_parts = Vec::new();
     for (idx, study) in studies.iter().enumerate() {
         let var_path = study.path.join(format!("chromosome={chrom}/variants.parquet"));
@@ -255,7 +234,6 @@ pub fn merge_chromosome(
          ORDER BY position"
     ))?;
 
-    // Read merged variants
     let conn = engine.connection();
     let mut stmt = conn.prepare(
         "SELECT position, ref_allele, alt_allele, u_meta, \
@@ -273,31 +251,46 @@ pub fn merge_chromosome(
     let mut rows = stmt.query([]).map_err(|e| FavorError::Analysis(format!("{e}")))?;
     let mut result = Vec::new();
 
-    while let Ok(Some(row)) = rows.next() {
-        let weights: Vec<f64> = (15..26).map(|c| row.get::<_, f64>(c).unwrap_or(0.0)).collect();
+    let chrom_parsed: Chromosome = chrom.parse().unwrap_or(Chromosome::Autosome(1));
 
-        // Parse study_segs LIST<STRUCT{s, seg}>
-        // DuckDB returns this as a string like [{s: 0, seg: 5}, {s: 1, seg: 5}]
+    while let Ok(Some(row)) = rows.next() {
+        let mut weights = [0.0f64; 11];
+        for (i, w) in weights.iter_mut().enumerate() {
+            *w = row.get::<_, f64>(15 + i).unwrap_or(0.0);
+        }
+
         let segs_str: String = row.get(26).unwrap_or_default();
         let study_segments = parse_study_segments(&segs_str);
 
+        let mac_total: i64 = row.get(4).unwrap_or(0);
+        let n_total: i64 = row.get(5).unwrap_or(0);
+        let maf = if n_total > 0 { mac_total as f64 / n_total as f64 } else { 0.0 };
+
         result.push(MetaVariant {
-            position: row.get::<_, i32>(0).unwrap_or(0) as u32,
-            ref_allele: row.get(1).unwrap_or_default(),
-            alt_allele: row.get(2).unwrap_or_default(),
+            variant: AnnotatedVariant {
+                chromosome: chrom_parsed,
+                position: row.get::<_, i32>(0).unwrap_or(0) as u32,
+                ref_allele: row.get(1).unwrap_or_default(),
+                alt_allele: row.get(2).unwrap_or_default(),
+                maf,
+                gene_name: row.get(6).unwrap_or_default(),
+                annotation: FunctionalAnnotation {
+                    region_type: row.get(7).unwrap_or_default(),
+                    consequence: row.get(8).unwrap_or_default(),
+                    cadd_phred: row.get(9).unwrap_or(0.0),
+                    revel: row.get(10).unwrap_or(0.0),
+                    regulatory: RegulatoryFlags {
+                        cage_promoter: row.get::<_, bool>(11).unwrap_or(false),
+                        cage_enhancer: row.get::<_, bool>(12).unwrap_or(false),
+                        ccre_promoter: row.get::<_, bool>(13).unwrap_or(false),
+                        ccre_enhancer: row.get::<_, bool>(14).unwrap_or(false),
+                    },
+                    weights: AnnotationWeights(weights),
+                },
+            },
             u_meta: row.get(3).unwrap_or(0.0),
-            mac_total: row.get(4).unwrap_or(0),
-            n_total: row.get(5).unwrap_or(0),
-            gene_name: row.get(6).unwrap_or_default(),
-            region_type: row.get(7).unwrap_or_default(),
-            consequence: row.get(8).unwrap_or_default(),
-            cadd_phred: row.get(9).unwrap_or(0.0),
-            revel: row.get(10).unwrap_or(0.0),
-            is_cage_promoter: row.get::<_, bool>(11).unwrap_or(false),
-            is_cage_enhancer: row.get::<_, bool>(12).unwrap_or(false),
-            is_ccre_promoter: row.get::<_, bool>(13).unwrap_or(false),
-            is_ccre_enhancer: row.get::<_, bool>(14).unwrap_or(false),
-            annotation_weights: weights,
+            mac_total,
+            n_total,
             study_segments,
         });
     }
@@ -306,34 +299,6 @@ pub fn merge_chromosome(
     engine.execute("DROP TABLE IF EXISTS _meta_variants")?;
 
     Ok(result)
-}
-
-/// Convert MetaVariants into AnnotatedVariants for mask building (reuse existing mask code).
-pub fn meta_to_annotated(meta_variants: &[MetaVariant], chrom: &str) -> Vec<AnnotatedVariant> {
-    meta_variants.iter().map(|mv| {
-        let maf = if mv.n_total > 0 {
-            mv.mac_total as f64 / mv.n_total as f64
-        } else {
-            0.0
-        };
-        AnnotatedVariant {
-            chromosome: chrom.to_string(),
-            position: mv.position,
-            ref_allele: mv.ref_allele.clone(),
-            alt_allele: mv.alt_allele.clone(),
-            maf,
-            gene_name: mv.gene_name.clone(),
-            region_type: mv.region_type.clone(),
-            consequence: mv.consequence.clone(),
-            cadd_phred: mv.cadd_phred,
-            revel: mv.revel,
-            annotation_weights: mv.annotation_weights.clone(),
-            is_cage_promoter: mv.is_cage_promoter,
-            is_cage_enhancer: mv.is_cage_enhancer,
-            is_ccre_promoter: mv.is_ccre_promoter,
-            is_ccre_enhancer: mv.is_ccre_enhancer,
-        }
-    }).collect()
 }
 
 /// Run meta-analysis score tests for one gene/mask group.
@@ -352,21 +317,17 @@ pub fn meta_score_gene(
 
     let m = indices.len();
 
-    // Build U vector from pre-summed values
     let mut u = Mat::zeros(m, 1);
     for (local, &gi) in indices.iter().enumerate() {
         u[(local, 0)] = meta_variants[gi].u_meta;
     }
 
-    // Build variant keys for covariance extraction
     let keys: Vec<(u32, &str, &str)> = indices.iter()
-        .map(|&gi| (meta_variants[gi].position, meta_variants[gi].ref_allele.as_str(), meta_variants[gi].alt_allele.as_str()))
+        .map(|&gi| (meta_variants[gi].variant.position, meta_variants[gi].variant.ref_allele.as_str(), meta_variants[gi].variant.alt_allele.as_str()))
         .collect();
 
-    // Merge covariance across studies
     let mut cov = Mat::zeros(m, m);
     for study_idx in 0..studies.len() {
-        // Find which segments this gene's variants come from in this study
         let mut needed_segments: std::collections::HashSet<i32> = std::collections::HashSet::new();
         for &gi in &indices {
             for &(sidx, seg_id) in &meta_variants[gi].study_segments {
@@ -389,21 +350,18 @@ pub fn meta_score_gene(
         }
     }
 
-    // MAFs from merged counts
     let mafs: Vec<f64> = indices.iter().map(|&gi| {
         let mv = &meta_variants[gi];
         if mv.n_total > 0 { mv.mac_total as f64 / mv.n_total as f64 } else { 0.0 }
     }).collect();
 
-    // Annotation matrix
-    let n_channels = super::weights::ANNOTATION_CHANNELS.len();
-    let ann_matrix: Vec<Vec<f64>> = (0..n_channels).map(|ch| {
+    let ann_matrix: Vec<Vec<f64>> = (0..11).map(|ch| {
         indices.iter().map(|&gi| {
-            meta_variants[gi].annotation_weights.get(ch).copied().unwrap_or(0.0)
+            meta_variants[gi].variant.annotation.weights.0[ch]
         }).collect()
     }).collect();
 
-    let sr = score_test::run_staar_from_sumstats(&u, &cov, &ann_matrix, &mafs);
+    let sr = score::run_staar_from_sumstats(&u, &cov, &ann_matrix, &mafs);
 
     let cmac: i64 = indices.iter().map(|&gi| meta_variants[gi].mac_total).sum();
 
@@ -420,7 +378,6 @@ pub fn meta_score_gene(
 }
 
 fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {
-    // Format: [{s: 0, seg: 5}, {s: 1, seg: 5}]
     let mut result = Vec::new();
     for part in s.split('{') {
         let part = part.trim_matches(|c: char| c == '[' || c == ']' || c == ',' || c == ' ' || c == '}');
@@ -441,4 +398,3 @@ fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {
     }
     result
 }
-

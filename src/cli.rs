@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::mode::Format;
+use crate::output::Format;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum GenomeBuild {
