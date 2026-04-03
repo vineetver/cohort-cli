@@ -1,0 +1,89 @@
+<p align="center">
+  <h1 align="center">FAVOR CLI</h1>
+  <p align="center">
+    From raw variants to biological mechanisms in one tool.
+    <br />
+    <strong>Annotate. Enrich. Analyze. Interpret.</strong>
+    <br />
+    <br />
+    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="AGENTS.md">Agent Reference</a> &middot; <a href="#roadmap">Roadmap</a>
+  </p>
+</p>
+
+<p align="center">
+  <a href="https://github.com/vineetver/favor-cli/actions/workflows/release.yml"><img src="https://github.com/vineetver/favor-cli/actions/workflows/release.yml/badge.svg" alt="Build"></a>
+  <a href="https://github.com/vineetver/favor-cli/releases/latest"><img src="https://img.shields.io/github/v/release/vineetver/favor-cli?color=blue" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/rust-stable-orange" alt="Rust">
+  <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="Platform">
+</p>
+
+---
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vineetver/favor-cli/master/install.sh | sh
+```
+
+## Quick start
+
+```bash
+favor setup
+favor ingest input.vcf.gz
+favor annotate input.ingested.parquet
+favor enrich input.annotated.parquet --tissue brain
+favor staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
+  --trait-name LDL --covariates age,sex,PC1,PC2 --annotations annotated.parquet
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `favor setup` | Configure tier, data paths, HPC environment, memory budget |
+| `favor ingest` | Ingest any variant format: WGS VCF, variant lists, credible sets, TSV/CSV/parquet |
+| `favor annotate` | Annotate with FAVOR functional annotations (200–508 GB, 24 chromosomes) |
+| `favor enrich` | Tissue-specific overlay: eQTL, sQTL, ChromBPNet, enhancer-gene links |
+| `favor staar` | STAAR rare-variant association testing (single-study) |
+| `favor meta-staar` | MetaSTAAR cross-biobank rare-variant meta-analysis (summary-stat based) |
+| `favor schema` | Inspect annotation table schemas |
+
+All commands support `--format json` and `--dry-run`. See [AGENTS.md](AGENTS.md) for the machine interface.
+
+## Data packs
+
+| Pack | Size | Description |
+|------|------|-------------|
+| **favor-base** | 200 GB | 40 curated annotation columns including pathogenicity, frequency, clinical, conservation, regulatory, aPC STAAR channels |
+| **favor-full** | 508 GB | All 54 annotation columns including dbnsfp, ENCODE, MaveDB, COSMIC |
+| eqtl | 3 GB | GTEx v10 eQTL/sQTL/apaQTL, 50 tissues, SuSiE fine-mapped |
+| sc-eqtl | 48 GB | Single-cell eQTL: OneK1K, DICE, PsychENCODE |
+| regulatory | 18 GB | cCRE tissue signals, chromatin states, accessibility |
+| enhancer-gene | 12 GB | ABC, EPIraction, rE2G, EpiMap, CRISPRi |
+| tissue-scores | 5 GB | ChromBPNet, allelic imbalance |
+
+## Roadmap
+
+| Feature | What it enables |
+|---------|-----------------|
+| **`favor interpret`** | Variant interpretation — pathogenicity scoring, fine-mapping, variant-to-gene mapping, tissue/cell-type assignment, functional validation (MaveDB, CRISPRi, MPRA) |
+| **Workflow orchestration** | Multi-stage pipelines under Nextflow with DAG scheduling, caching/resume, SLURM sizing from `--dry-run`, HPC/cloud portability |
+| **Lineage and provenance** | Every output traces back to its exact inputs, annotations, parameters, and software versions — reproducible by default |
+| **Closed feedback loop** | Downstream results (STAAR hits, fine-mapped loci) feed back upstream to refine annotations, tighten tissue assignments, and focus interpretation on the variants that matter |
+
+## Citation
+
+FAVOR CLI implements the [STAAR](https://github.com/xihaoli/STAARpipeline) framework and the [FAVOR](https://favor.genohub.org) annotation database. If you use this tool, please cite:
+
+> Li Z\*, Li X\*, Zhou H, et al. **A framework for detecting noncoding rare variant associations of large-scale whole-genome sequencing studies.** *Nature Methods*, 19(12), 1599-1611 (2022). [DOI: 10.1038/s41592-022-01640-x](https://doi.org/10.1038/s41592-022-01640-x)
+
+> Li X\*, Li Z\*, Zhou H, et al. **Dynamic incorporation of multiple in silico functional annotations empowers rare variant association analysis of large whole-genome sequencing studies at scale.** *Nature Genetics*, 52(9), 969-983 (2020). [DOI: 10.1038/s41588-020-0676-4](https://doi.org/10.1038/s41588-020-0676-4)
+
+> Zhou H, Verma V, Li X, et al. **FAVOR 2.0: A reengineered functional annotation of variants online resource for interpreting genomic variation.** *Nucleic Acids Research*, 54(D1), D1405-D1414 (2026). [DOI: 10.1093/nar/gkaf1217](https://doi.org/10.1093/nar/gkaf1217)
+
+> Li TC, Zhou H, Verma V, et al. **FAVOR-GPT: a generative natural language interface to whole genome variant functional annotations.** *Bioinformatics Advances*, 4(1), vbae143 (2024). [DOI: 10.1093/bioadv/vbae143](https://doi.org/10.1093/bioadv/vbae143)
+
+## License
+
+GPL-3.0

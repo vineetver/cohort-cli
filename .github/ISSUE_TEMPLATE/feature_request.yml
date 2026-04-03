@@ -1,0 +1,27 @@
+name: Feature Request
+description: Suggest a new command, data pack, or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like?
+      placeholder: Describe the feature
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      placeholder: What analysis are you trying to run?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New command
+        - Existing command improvement
+        - Data pack
+        - Agent / JSON interface
+        - Documentation
+        - Performance

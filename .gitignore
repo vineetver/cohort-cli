@@ -1,0 +1,14 @@
+/target
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.claude/
+/scripts/
+
+CLAUDE.md
+ARCHITECTURE.md
+TODO.md
+data/

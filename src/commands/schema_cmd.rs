@@ -1,0 +1,183 @@
+use serde_json::json;
+
+use crate::annotation_db::AnnotationDb;
+use crate::config::{Config, DirProbe, Tier};
+use crate::db::engine::DuckEngine;
+use crate::error::FavorError;
+use crate::output::Output;
+use crate::resource::Resources;
+
+pub fn run(table: Option<String>, out: &dyn Output) -> Result<(), FavorError> {
+    let config = Config::load_configured()?;
+    let resources = Resources::detect_with_config(&config.resources);
+
+    match table.as_deref() {
+        None => list_tables(&config, out),
+        Some("base") => describe_tier(&config, Tier::Base, &resources, out),
+        Some("full") => describe_tier(&config, Tier::Full, &resources, out),
+        Some(name) => describe_tissue_table(&config, name, &resources, out),
+    }
+}
+
+fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
+    let probe = DirProbe::scan(&config.root_dir());
+    let mut tables = Vec::new();
+
+    for tier in &[Tier::Base, Tier::Full] {
+        let chroms = match tier {
+            Tier::Base => probe.base_chroms,
+            Tier::Full => probe.full_chroms,
+        };
+        let status = if chroms == 0 {
+            "not installed".to_string()
+        } else {
+            format!("{}/24 chromosomes", chroms)
+        };
+        let entry = json!({
+            "name": tier.as_str(),
+            "type": "annotation",
+            "status": status,
+            "size": tier.size_human(),
+        });
+        out.status(&format!("{}: {} ({})", tier.as_str(), status, tier.size_human()));
+        tables.push(entry);
+    }
+
+    let mut tissue_names: Vec<String> = probe.tissue_tables.clone();
+    tissue_names.sort();
+    for name in &tissue_names {
+        let entry = json!({
+            "name": name,
+            "type": "tissue",
+            "status": "installed",
+        });
+        out.status(&format!("{}: installed", name));
+        tables.push(entry);
+    }
+
+    if tissue_names.is_empty() {
+        out.status("No tissue tables installed. Run `favor data pull --pack eqtl` to add tissue data.");
+    }
+
+    out.result_json(&json!({ "tables": tables }));
+    Ok(())
+}
+
+fn describe_tier(
+    config: &Config,
+    tier: Tier,
+    resources: &Resources,
+    out: &dyn Output,
+) -> Result<(), FavorError> {
+    let ann_db = AnnotationDb::open_tier(config, tier)?;
+    let sample = match ann_db.chrom_parquet("1") {
+        Some(p) => p,
+        None => return Err(FavorError::DataMissing(format!(
+            "{} tier chromosome=1 not found. Run `favor data pull{}` first.",
+            tier,
+            if tier == Tier::Full { " --full" } else { "" },
+        ))),
+    };
+
+    let engine = DuckEngine::new(resources)?;
+    let columns = describe_parquet(&engine, &sample.to_string_lossy())?;
+
+    for col in &columns {
+        out.status(&format!("{}: {}", col.name, col.col_type));
+    }
+
+    out.result_json(&json!({
+        "table": tier.as_str(),
+        "file": sample.to_string_lossy(),
+        "columns": columns.iter()
+            .map(|c| json!({"name": c.name, "type": c.col_type}))
+            .collect::<Vec<_>>(),
+    }));
+    Ok(())
+}
+
+fn describe_tissue_table(
+    config: &Config,
+    name: &str,
+    resources: &Resources,
+    out: &dyn Output,
+) -> Result<(), FavorError> {
+    let table_dir = config.tissue_dir().join(name);
+    if !table_dir.is_dir() {
+        return Err(FavorError::DataMissing(format!(
+            "Tissue table '{}' not found. Run `favor schema` to list available tables.",
+            name,
+        )));
+    }
+
+    let sample = find_first_parquet(&table_dir)?;
+    let engine = DuckEngine::new(resources)?;
+    let columns = describe_parquet(&engine, &sample.to_string_lossy())?;
+
+    for col in &columns {
+        out.status(&format!("{}: {}", col.name, col.col_type));
+    }
+
+    out.result_json(&json!({
+        "table": name,
+        "file": sample.to_string_lossy(),
+        "columns": columns.iter()
+            .map(|c| json!({"name": c.name, "type": c.col_type}))
+            .collect::<Vec<_>>(),
+    }));
+    Ok(())
+}
+
+struct ColumnInfo {
+    name: String,
+    col_type: String,
+}
+
+fn describe_parquet(engine: &DuckEngine, path: &str) -> Result<Vec<ColumnInfo>, FavorError> {
+    let sql = format!("DESCRIBE SELECT * FROM read_parquet('{}')", path);
+    let conn = engine.connection();
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| FavorError::Analysis(format!("DESCRIBE failed: {e}")))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| FavorError::Analysis(format!("DESCRIBE failed: {e}")))?;
+
+    let mut columns = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| FavorError::Analysis(format!("{e}")))?
+    {
+        let name: String = row
+            .get(0)
+            .map_err(|e| FavorError::Analysis(format!("{e}")))?;
+        let col_type: String = row
+            .get(1)
+            .map_err(|e| FavorError::Analysis(format!("{e}")))?;
+        columns.push(ColumnInfo { name, col_type });
+    }
+    Ok(columns)
+}
+
+fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf, FavorError> {
+    let entries: Vec<_> = std::fs::read_dir(table_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("chrom_id=") && e.path().is_dir()
+        })
+        .collect();
+
+    for entry in &entries {
+        let data_file = entry.path().join("data_0.parquet");
+        if data_file.exists() {
+            return Ok(data_file);
+        }
+    }
+
+    Err(FavorError::DataMissing(format!(
+        "No parquet files found in {}. The table may be empty or corrupted.",
+        table_dir.display(),
+    )))
+}
