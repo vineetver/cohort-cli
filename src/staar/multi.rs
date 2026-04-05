@@ -16,6 +16,7 @@ use super::stats;
 
 /// Result for one gene across all traits.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // wired when --traits lands (v0.2.0)
 pub struct MultiStaarResult {
     /// Per-trait STAAR results (one per phenotype).
     pub per_trait: Vec<StaarResult>,
@@ -29,6 +30,7 @@ pub struct MultiStaarResult {
 ///
 /// `null_models`: one per trait, fit independently.
 /// Returns per-trait STAAR results plus cross-trait omnibus p-values.
+#[allow(dead_code)] // wired when --traits lands (v0.2.0)
 pub fn run_multi_staar(
     g: &Mat<f64>,
     annotation_matrix: &[Vec<f64>],

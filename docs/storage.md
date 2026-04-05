@@ -2,6 +2,8 @@
 
 FAVOR stores genotypes as a sparse matrix over `(sample_id, variant_vcf) -> dosage`. All queries resolve to aligned vectors over `variant_vcf`. All operations are vectorized transformations over these aligned index spaces. No alternative variant ordering or implicit joins anywhere.
 
+> **Coordinate convention:** All genomic positions are **1-based** (VCF convention). The FAVOR annotation data, ingested variant sets, and all pipeline output use 1-based positions. Input in 0-based formats (e.g. BED) is converted at ingest. The `variant_vcf` dense index (0, 1, 2, ..., N-1) is a separate concept — an internal array index, not a genomic coordinate.
+
 > [Back to README](../README.md)
 
 ---

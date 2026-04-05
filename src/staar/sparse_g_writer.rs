@@ -300,6 +300,7 @@ fn write_variants_parquet(
     // The full query is already sorted by (pos, ref, alt).
     struct MetaRow {
         maf: f64,
+        #[allow(dead_code)]
         gene: String,
         region_type: String,
         consequence: String,

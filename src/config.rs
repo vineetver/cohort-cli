@@ -85,6 +85,7 @@ impl Tier {
     }
 
     /// Top-level struct columns present in this tier's annotation parquets.
+    #[allow(dead_code)]
     pub fn source_columns(self) -> &'static [&'static str] {
         match self {
             Tier::Base => &["gencode", "main", "ccre"],
@@ -96,6 +97,7 @@ impl Tier {
     }
 
     /// Does this tier's annotation parquet include a given source column?
+    #[allow(dead_code)]
     pub fn has_source(self, col: &str) -> bool {
         self.source_columns().contains(&col)
     }

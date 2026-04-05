@@ -47,6 +47,7 @@ impl CarrierList {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn mac(&self) -> u32 {
         self.entries.iter().map(|e| e.dosage as u32).sum()
     }
@@ -58,6 +59,7 @@ impl CarrierList {
 
 /// A named weight vector aligned to variant_vcf.
 /// First-class citizen: can be selected, combined, and composed at runtime.
+#[allow(dead_code)] // fields accessed via VariantIndex weight methods
 pub struct WeightVector {
     pub name: &'static str,
     pub values: Vec<f64>,
@@ -127,6 +129,7 @@ pub struct VariantIndex {
     /// vid string → variant_vcf.
     vid_to_vcf: HashMap<Box<str>, u32>,
     /// Named weight vectors, each of length n_variants, aligned to variant_vcf.
+    #[allow(dead_code)]
     pub weight_channels: Vec<WeightVector>,
 }
 
@@ -180,6 +183,7 @@ impl VariantIndex {
     /// Compile a mask on demand: applies MAF + predicate to a gene's variants.
     /// Returns qualifying variant_vcfs as LOCAL indices into gene_vcfs.
     /// No pre-materialization — memory stays O(N) for base metadata.
+    #[allow(dead_code)]
     pub fn compile_mask(
         &self,
         gene_vcfs: &[u32],
@@ -226,11 +230,13 @@ impl VariantIndex {
     // ── Weight channel access ────────────────────────────────────────────
 
     /// Get a weight channel by index.
+    #[allow(dead_code)]
     pub fn weight_channel(&self, index: usize) -> &WeightVector {
         &self.weight_channels[index]
     }
 
     /// Extract weight values for a subset of variant_vcfs.
+    #[allow(dead_code)]
     pub fn weight_values(&self, channel: usize, variant_vcfs: &[u32]) -> Vec<f64> {
         let vals = &self.weight_channels[channel].values;
         variant_vcfs.iter().map(|&v| vals[v as usize]).collect()

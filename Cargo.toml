@@ -2,9 +2,14 @@
 name = "favor"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Genomic variant annotation, tissue enrichment, and rare-variant association testing"
 license = "GPL-3.0"
-repository = "https://github.com/favor-genomics/favor-cli"
+repository = "https://github.com/vineetver/favor-cli"
+homepage = "https://github.com/vineetver/favor-cli"
+readme = "README.md"
+keywords = ["genomics", "staar", "rare-variant", "association-testing", "annotation"]
+categories = ["science", "command-line-utilities"]
 authors = ["Xihong Lin Lab <xlin@hsph.harvard.edu>"]
 
 [dependencies]
@@ -31,7 +36,7 @@ noodles-bgzf = "0.14"
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
 
-# DataFusion: execution engine (replacing DuckDB)
+# DataFusion: query execution engine
 datafusion = "53"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 async-trait = "0.1"

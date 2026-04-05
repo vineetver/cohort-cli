@@ -15,6 +15,7 @@ pub mod score;
 pub mod score_cache;
 pub mod stats;
 pub mod store;
+#[allow(dead_code)] // wired when `favor validate-store` lands
 pub mod store_validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -506,7 +506,9 @@ impl AnnotatedSet {
     pub fn tier(&self) -> Tier { self.meta.tier }
     pub fn root(&self) -> &Path { &self.root }
     pub fn variant_count(&self) -> u64 { self.meta.variant_count }
+    #[allow(dead_code)]
     pub fn columns(&self) -> &[String] { &self.meta.columns }
+    #[allow(dead_code)]
     pub fn chromosomes(&self) -> &[String] { &self.meta.chromosomes }
 
     /// Validate that this annotated set supports the given pipeline columns.
@@ -527,6 +529,7 @@ impl AnnotatedSet {
     }
 
     /// Check that a specific column name exists in the output schema.
+    #[allow(dead_code)]
     pub fn has_column(&self, name: &str) -> bool {
         self.meta.columns.iter().any(|c| c == name)
     }
@@ -536,6 +539,7 @@ impl AnnotatedSet {
 // EnrichedSet (annotated + tissue overlays)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // enrichment pipeline (v0.2.0)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedSetMeta {
     pub source: String,
@@ -546,11 +550,13 @@ pub struct EnrichedSetMeta {
     pub input_count: i64,
 }
 
+#[allow(dead_code)] // enrichment pipeline (v0.2.0)
 pub struct EnrichedSet {
     root: PathBuf,
     meta: EnrichedSetMeta,
 }
 
+#[allow(dead_code)] // enrichment pipeline (v0.2.0)
 impl EnrichedSet {
     pub fn new(root: PathBuf, meta: EnrichedSetMeta) -> Self {
         Self { root, meta }
@@ -641,6 +647,7 @@ impl TissueTable {
         true // all current tables have tissue filtering
     }
 
+    #[allow(dead_code)]
     pub fn required_pack(self) -> &'static str {
         match self {
             Self::Eqtl | Self::Sqtl | Self::ApaQtl
@@ -677,6 +684,7 @@ impl TissueDb {
         Ok(Self { root: tissue_dir.to_path_buf(), available })
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path { &self.root }
     pub fn available_tables(&self) -> &[TissueTable] { &self.available }
 
@@ -684,6 +692,7 @@ impl TissueDb {
         self.root.join(table.dir_name())
     }
 
+    #[allow(dead_code)]
     pub fn validate_tables(&self, needed: &[TissueTable]) -> Result<(), FavorError> {
         let missing: Vec<_> = needed.iter()
             .filter(|t| !self.available.contains(t))

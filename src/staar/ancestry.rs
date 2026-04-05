@@ -30,6 +30,7 @@ pub struct AncestryInfo {
 /// Final p-value: Cauchy combination of all tests across both scenarios.
 ///
 /// `pop_mafs[variant][population]` = MAF in that population.
+#[allow(dead_code)] // wired when --ai-staar lands (v0.2.0)
 pub fn run_ai_staar(
     g: &Mat<f64>,
     annotation_matrix: &[Vec<f64>],

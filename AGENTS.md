@@ -30,7 +30,7 @@ down to target gene, mechanism, and cell type.
 
 ## Memory
 
-FAVOR adapts to available memory. DuckDB commands (annotate, enrich, ingest) work with any
+FAVOR adapts to available memory. DataFusion commands (annotate, enrich, ingest) work with any
 allocation. STAAR needs the genotype matrix in RAM per-chromosome — use `--dry-run` first:
 
 ```bash

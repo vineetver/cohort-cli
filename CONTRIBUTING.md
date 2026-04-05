@@ -3,38 +3,72 @@
 ## Build
 
 ```bash
-cargo check                                      # iterate fast (no DuckDB linking)
-srun -p test -c 8 --mem=16G cargo build --release # full build on HPC
+git clone https://github.com/vineetver/favor-cli.git
+cd favor-cli
+cargo check           # type-check (~10s)
+cargo test            # run test suite
+cargo build --release # full build (~5 min, pulls DataFusion + Arrow)
 ```
 
-First build takes ~10 min (DuckDB). `cargo check` takes seconds.
+> **HPC users:** never build on login nodes. Use `srun -p <partition> -c 8 --mem=16G cargo build --release`.
 
-## Rules
+## Workflow
 
-- Zero warnings. Always.
-- Every error message tells the user what command fixes it.
-- No `println!`. All output goes through the `Output` trait.
-- No hardcoded sizes. Derive from `resources.memory_bytes`.
-- If it doesn't fit in memory, batch it. Never crash.
-- Types over strings. Enums over magic values.
-- Commands are thin. Logic lives in modules.
-- Early returns. Flat control flow. No deep nesting.
+1. Fork the repo and create a branch from `master`
+2. Make your changes
+3. `cargo check` with zero warnings (`RUSTFLAGS="-D warnings"`)
+4. `cargo test` passes
+5. Open a pull request
 
-## Add a command
+## Code standards
 
-1. Create `src/commands/<name>.rs`
-2. Add variant to `Command` in `src/cli.rs`
+**Every line ships.** No commented-out code, placeholder TODOs, or dead code.
+
+| Principle | In practice |
+|-----------|-------------|
+| Strong types | Enums over strings. Parse at the boundary, convert immediately. |
+| Actionable errors | Every error tells the user what command fixes it. |
+| Output contract | All output through the `Output` trait. Never bare `println!`. |
+| Memory-aware | Derive from `Resources::detect()`. Batch when it doesn't fit. Never crash. |
+| Flat control flow | Early returns, guard clauses, match arms that return directly. |
+| Thin commands | Commands validate and dispatch. Logic lives in modules. |
+| Statistical invariance | Refactoring must never change p-values. |
+
+## Architecture
+
+```
+src/
+  main.rs              CLI entry point
+  cli.rs               clap definitions
+  column.rs            Col enum, single source of truth for all column names
+  engine.rs            DataFusion query engine
+  types.rs             Domain types: Chromosome, Consequence, AnnotatedVariant
+  error.rs             FavorError with exit codes and recovery hints
+  output.rs            Output trait: human (colored) + machine (JSON)
+
+  commands/            One file per CLI command (thin dispatch)
+  ingest/              Format detection, VCF parsing, SQL generation
+  data/                Parquet data layer, MinIO transfer, annotation DB
+  staar/               STAAR association pipeline, scoring, sparse genotype store
+  setup/               Interactive configuration wizard
+```
+
+## Adding a command
+
+1. Create `src/commands/<name>.rs` with a typed config struct
+2. Add a variant to `Command` in `src/cli.rs`
 3. Route in `src/main.rs`
-4. Support `--dry-run` and `--format json`
-5. Use `Resources::detect_with_config()` for memory (except setup, which uses `detect()`)
+4. Support `--dry-run` (validate + emit JSON plan) and `--format json`
+5. Use `Resources::detect_with_config()` for memory-aware sizing
 
-## Add a data pack
+## Adding a data pack
 
-One entry in `PACKS` in `src/packs.rs`. Everything else picks it up.
+One entry in `PACKS` in `src/data/mod.rs`. Everything else picks it up.
 
-## Test
+## Bugs
 
-```bash
-cargo test
-cargo check  # must be zero warnings
-```
+Use the [bug report template](https://github.com/vineetver/favor-cli/issues/new?template=bug_report.yml). Include `favor --version`, platform, and memory allocation.
+
+## License
+
+By contributing you agree your contributions are licensed under [GPL-3.0](LICENSE).

@@ -21,6 +21,7 @@ use crate::staar::carrier::reader::{CarrierEntry, CarrierList};
 ///
 /// Indexed by variant_vcf. No gene concept — just (sample_id, variant_vcf) → dosage.
 /// variant_vcf is a dense, immutable index over the variant universe for this chromosome.
+#[allow(dead_code)] // accessors used by store_validate and future diagnostics
 pub struct SparseG {
     mmap: Mmap,
     n_samples: u32,
@@ -76,23 +77,27 @@ impl SparseG {
         })
     }
 
+    #[allow(dead_code)]
     pub fn n_samples(&self) -> u32 {
         self.n_samples
     }
 
+    #[allow(dead_code)]
     pub fn n_variants(&self) -> u32 {
         self.n_variants
     }
 
     /// Raw offsets table. offsets[v] = byte offset of variant v's carrier data
     /// relative to SPARSE_G_HEADER_SIZE.
+    #[allow(dead_code)]
     pub fn offsets(&self) -> &[u64] {
         &self.offsets
     }
 
     /// Total carrier data size in bytes (from header to offsets table start).
+    #[allow(dead_code)]
     pub fn carrier_data_size(&self) -> u64 {
-        if let Some(&last) = self.offsets.last() {
+        if let Some(&_last) = self.offsets.last() {
             // The carrier data region ends where the offsets table begins.
             // offsets_start - HEADER_SIZE is the total carrier data bytes.
             // But we can also compute it from the mmap: offsets_start is stored
