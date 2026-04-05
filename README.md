@@ -6,7 +6,7 @@
     <strong>Annotate. Enrich. Analyze. Interpret.</strong>
     <br />
     <br />
-    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="docs/genotype_storage.md">Storage Format</a> &middot; <a href="docs/STAAR_VALIDATION.md">Validation</a> &middot; <a href="AGENTS.md">Agent Reference</a> &middot; <a href="#roadmap">Roadmap</a>
+    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="docs/storage.md">Storage Format</a> &middot; <a href="docs/validation.md">Validation</a> &middot; <a href="AGENTS.md">Agent Reference</a> &middot; <a href="#roadmap">Roadmap</a>
   </p>
 </p>
 
@@ -63,7 +63,7 @@ Genotypes are stored as a canonical sparse matrix **G** over `(sample_id, varian
 
 Interactive results: Plotly.js summary with Manhattan, QQ, and volcano plots.
 
-See [docs/genotype_storage.md](docs/genotype_storage.md) for the storage format and [docs/STAAR_VALIDATION.md](docs/STAAR_VALIDATION.md) for validation against the R STAARpipeline.
+See [docs/storage.md](docs/storage.md) for the storage format and [docs/validation.md](docs/validation.md) for validation against the R STAARpipeline.
 
 ## Data packs
 
