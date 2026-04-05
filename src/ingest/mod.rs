@@ -2,10 +2,11 @@
 //!
 //! Two modes:
 //! - Happy path: `favor ingest <file>` — auto-detect, normalize, write parquet
-//! - Escape hatch: `favor ingest <file> --emit-sql` — generate editable DuckDB script
+//! - Escape hatch: `favor ingest <file> --emit-sql` — generate editable SQL script
 
 pub mod sql;
 pub mod detect;
+pub mod format;
 pub mod vcf;
 
 use std::io::{BufRead, BufReader};
@@ -34,12 +35,16 @@ pub enum Delimiter {
 }
 
 impl Delimiter {
-    pub fn sql_literal(self) -> &'static str {
+    pub fn char(self) -> char {
         match self {
-            Delimiter::Tab => "'\\t'",
-            Delimiter::Comma => "','",
-            Delimiter::Space => "' '",
+            Delimiter::Tab => '\t',
+            Delimiter::Comma => ',',
+            Delimiter::Space => ' ',
         }
+    }
+
+    pub fn byte(self) -> u8 {
+        self.char() as u8
     }
 }
 
@@ -130,7 +135,9 @@ impl Analysis {
 /// This is the boundary — after this, InputFormat is a branded type.
 pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), FavorError> {
     let name = path.file_name()
-        .ok_or_else(|| FavorError::Input("No file name".into()))?
+        .ok_or_else(|| FavorError::Input(format!(
+            "Path '{}' has no file name component.", path.display()
+        )))?
         .to_string_lossy()
         .to_lowercase();
 
@@ -168,12 +175,12 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Fa
 }
 
 /// Sniff delimiter from the first line of a text file.
-fn sniff_delimiter(path: &Path) -> Result<Delimiter, FavorError> {
+pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, FavorError> {
     let file = std::fs::File::open(path)
         .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
     if path.to_string_lossy().ends_with(".gz") {
-        // For .gz files, DuckDB handles decompression — default to tab
+        // For .gz files, engine handles decompression — default to tab
         return Ok(Delimiter::Tab);
     }
 
@@ -233,7 +240,7 @@ pub fn read_headers(path: &Path, delimiter: Delimiter) -> Result<Vec<String>, Fa
 }
 
 /// Full analysis: detect format, map columns, detect join key.
-/// Build detection is separate (requires DuckDB + annotation parquets).
+/// Build detection is separate (requires annotation parquets).
 pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
     let (format, delimiter) = detect_format(path)?;
 
@@ -262,7 +269,7 @@ pub fn analyze(path: &Path) -> Result<Analysis, FavorError> {
         }),
 
         InputFormat::Parquet => {
-            // For parquet, we'll inspect schema via DuckDB in the command handler
+            // For parquet, schema is inspected in the command handler
             Ok(Analysis {
                 format,
                 delimiter: None,
@@ -457,6 +464,79 @@ static AMBIGUOUS_ALLELE_COLS: &[&str] = &["a1", "a2", "allele1", "allele2"];
 /// Apply the alias map to raw input column names.
 /// Returns (mapped, ambiguous, unmapped) — pure function, no side effects.
 pub fn map_columns(raw_columns: &[String]) -> (Vec<ColumnMapping>, Vec<Ambiguity>, Vec<String>) {
+    map_columns_with(raw_columns, ALIASES, AMBIGUOUS_ALLELE_COLS)
+}
+
+// ── Column resolver ─────────────────────────────────────────────────────────
+// Structured API over the ALIASES map: resolve input columns to canonical names
+// and report what's missing, ambiguous, or unmapped.
+
+#[allow(dead_code)] // public API — consumed by future commands
+pub struct ResolvedColumns {
+    pub mapping: Vec<ColumnMapping>,
+    pub unmapped: Vec<String>,
+    pub missing_required: Vec<&'static str>,
+    pub ambiguous: Vec<Ambiguity>,
+}
+
+#[allow(dead_code)] // public API — presets for variant, GWAS, credible set resolution
+pub struct ColumnResolver {
+    aliases: &'static [(&'static str, &'static str)],
+    ambiguous: &'static [&'static str],
+    required: &'static [&'static str],
+}
+
+#[allow(dead_code)]
+impl ColumnResolver {
+    /// Standard variant resolver (chrom, pos, ref, alt required).
+    pub fn variant() -> Self {
+        Self {
+            aliases: ALIASES,
+            ambiguous: AMBIGUOUS_ALLELE_COLS,
+            required: &["chromosome", "position", "ref", "alt"],
+        }
+    }
+
+    /// GWAS summary statistics (variant + beta + se + pvalue).
+    pub fn gwas_sumstats() -> Self {
+        Self {
+            aliases: ALIASES,
+            ambiguous: AMBIGUOUS_ALLELE_COLS,
+            required: &["chromosome", "position", "ref", "alt", "beta", "se", "pvalue"],
+        }
+    }
+
+    /// Credible set (variant + pip + cs_id).
+    pub fn credible_set() -> Self {
+        Self {
+            aliases: ALIASES,
+            ambiguous: AMBIGUOUS_ALLELE_COLS,
+            required: &["chromosome", "position", "ref", "alt", "pip", "cs_id"],
+        }
+    }
+
+    pub fn resolve(&self, input_columns: &[String]) -> ResolvedColumns {
+        let (mapped, ambiguous, unmapped) = map_columns_with(input_columns, self.aliases, self.ambiguous);
+
+        let mapped_canonicals: Vec<&str> = mapped.iter()
+            .map(|m| m.canonical)
+            .collect();
+
+        let missing_required: Vec<&str> = self.required.iter()
+            .filter(|r| !mapped_canonicals.contains(r))
+            .copied()
+            .collect();
+
+        ResolvedColumns { mapping: mapped, unmapped, missing_required, ambiguous }
+    }
+}
+
+/// Internal: map columns using a given alias table and ambiguity list.
+fn map_columns_with(
+    raw_columns: &[String],
+    aliases: &'static [(&'static str, &'static str)],
+    ambiguous_cols: &[&str],
+) -> (Vec<ColumnMapping>, Vec<Ambiguity>, Vec<String>) {
     let mut mapped = Vec::new();
     let mut ambiguous = Vec::new();
     let mut unmapped = Vec::new();
@@ -464,8 +544,7 @@ pub fn map_columns(raw_columns: &[String]) -> (Vec<ColumnMapping>, Vec<Ambiguity
     for col in raw_columns {
         let lower = col.to_lowercase().trim().to_string();
 
-        // Check ambiguous allele columns first
-        if AMBIGUOUS_ALLELE_COLS.contains(&lower.as_str()) {
+        if ambiguous_cols.contains(&lower.as_str()) {
             ambiguous.push(Ambiguity {
                 column: col.clone(),
                 candidates: vec!["ref", "alt"],
@@ -476,8 +555,7 @@ pub fn map_columns(raw_columns: &[String]) -> (Vec<ColumnMapping>, Vec<Ambiguity
             continue;
         }
 
-        // Look up in alias map
-        if let Some((_, canonical)) = ALIASES.iter().find(|(alias, _)| *alias == lower) {
+        if let Some((_, canonical)) = aliases.iter().find(|(alias, _)| *alias == lower) {
             mapped.push(ColumnMapping {
                 input_name: col.clone(),
                 canonical,
@@ -490,7 +568,43 @@ pub fn map_columns(raw_columns: &[String]) -> (Vec<ColumnMapping>, Vec<Ambiguity
     (mapped, ambiguous, unmapped)
 }
 
-/// Get the DuckDB type to CAST a canonical column to.
+// ── Column contracts ────────────────────────────────────────────────────────
+// Upfront schema validation: every command checks required columns before compute.
+
+pub struct ColumnRequirement {
+    pub name: &'static str,
+    pub source: &'static str,
+    pub used_by: &'static str,
+}
+
+pub struct ColumnContract {
+    #[allow(dead_code)] // documentation/debugging field
+    pub command: &'static str,
+    pub required: &'static [ColumnRequirement],
+}
+
+impl ColumnContract {
+    /// Check that all required columns exist in the schema.
+    /// Returns Vec of missing columns (empty = valid).
+    pub fn check(&self, available: &[String]) -> Vec<&ColumnRequirement> {
+        self.required.iter()
+            .filter(|r| !available.iter().any(|c| c == r.name))
+            .collect()
+    }
+
+    /// Format missing columns into an actionable error message.
+    pub fn format_missing(missing: &[&ColumnRequirement]) -> String {
+        missing.iter()
+            .map(|r| format!(
+                "  '{}' (from {}, needed by {})",
+                r.name, r.source, r.used_by
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// SQL type for CAST in SELECT statements.
 pub fn canonical_type(canonical: &str) -> &'static str {
     match canonical {
         "chromosome" => "VARCHAR",

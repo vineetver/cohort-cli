@@ -1,6 +1,6 @@
 use faer::Mat;
 
-use super::null_model::NullModel;
+use super::model::NullModel;
 use super::score::{self, StaarResult};
 use super::stats;
 
@@ -13,6 +13,7 @@ use super::stats;
 ///
 /// Reference: Li et al. (2024), AI-STAAR in xihaoli/STAAR
 
+#[allow(dead_code)] // fields read by run_ai_staar when --ancestry-col is used
 /// Per-population allele frequencies and group assignments.
 pub struct AncestryInfo {
     /// Population group label for each sample (0-indexed).
@@ -103,7 +104,7 @@ pub fn run_ai_staar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::null_model;
+    use super::super::model;
 
     #[test]
     fn ai_staar_two_populations() {
@@ -142,7 +143,7 @@ mod tests {
             x[(i, 0)] = 1.0;
         }
 
-        let null = null_model::fit_glm(&y, &x);
+        let null = model::fit_glm(&y, &x);
         let result = run_ai_staar(&g, &ann, &pop_mafs, &ancestry, &null, false);
 
         assert!(result.staar_o >= 0.0 && result.staar_o <= 1.0);

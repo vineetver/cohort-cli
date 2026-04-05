@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use crate::config::{Environment, ResourceConfig};
+use crate::config::{Config, Environment, ResourceConfig};
 
-/// Detected system resources for DuckDB and parallel execution.
+/// Detected system resources for DataFusion and parallel execution.
 ///
 /// Memory resolution priority:
 /// 1. SLURM allocation (SLURM_MEM_PER_NODE) — srun jobs get full allocation
@@ -18,6 +18,15 @@ pub struct Resources {
 }
 
 impl Resources {
+    /// Load config and detect resources in one call.
+    /// If config doesn't exist or can't be read, falls back to auto-detect.
+    pub fn detect_configured() -> Self {
+        let config_resources = Config::load()
+            .map(|c| c.resources)
+            .unwrap_or_default();
+        Self::detect_with_config(&config_resources)
+    }
+
     /// Auto-detect resources without config. Used during setup (before config exists).
     pub fn detect() -> Self {
         Self {
@@ -35,9 +44,9 @@ impl Resources {
     /// - Falls back to auto-detect if no budget is configured.
     pub fn detect_with_config(config: &ResourceConfig) -> Self {
         let memory_bytes = if let Some(bytes) = slurm_memory() {
-            bytes
+            bytes // 95% of SLURM allocation
         } else if let Some(budget) = config.memory_budget_bytes() {
-            budget * 80 / 100
+            budget * 90 / 100
         } else {
             detect_memory()
         };
@@ -74,37 +83,22 @@ impl Resources {
         "local"
     }
 
-    /// DuckDB memory_limit string.
-    ///
-    /// Uses memory_bytes directly — the 80% safety margin is already applied
-    /// at the budget level (in detect_with_config). DuckDB also spills to
-    /// temp_dir when it exceeds this limit, so this is a soft ceiling.
-    pub fn duckdb_memory(&self) -> String {
-        let gb = self.memory_bytes / (1024 * 1024 * 1024);
-        if gb > 0 {
-            format!("{}GB", gb)
-        } else {
-            let mb = self.memory_bytes / (1024 * 1024);
-            format!("{}MB", mb.max(512))
-        }
-    }
-
 }
 
-/// Check for SLURM memory allocation. Returns bytes if inside an srun job.
+/// SLURM allocation in bytes. Uses 95% — leaves headroom for slurmstepd + kernel.
 fn slurm_memory() -> Option<u64> {
     let val = std::env::var("SLURM_MEM_PER_NODE").ok()?;
     let mb = val.trim_end_matches('M').parse::<u64>().ok()?;
-    Some(mb * 1024 * 1024 * 80 / 100)
+    Some(mb * 1024 * 1024 * 95 / 100)
 }
 
+/// Auto-detect available memory. 90% of detected — leaves room for OS.
 fn detect_memory() -> u64 {
-    // SLURM job allocation - most reliable on HPC
     if let Some(bytes) = slurm_memory() {
         return bytes;
     }
 
-    // cgroup memory limit (works on login nodes with resource limits)
+    // cgroup memory limit (login nodes with resource limits)
     for path in &[
         "/sys/fs/cgroup/memory/memory.limit_in_bytes",
         "/sys/fs/cgroup/memory.max",
@@ -113,29 +107,28 @@ fn detect_memory() -> u64 {
             let trimmed = content.trim();
             if trimmed != "max" && trimmed != "9223372036854771712" {
                 if let Ok(bytes) = trimmed.parse::<u64>() {
-                    if bytes < 1024 * 1024 * 1024 * 1024 { // sanity: < 1TB
-                        return bytes * 80 / 100;
+                    if bytes < 1024 * 1024 * 1024 * 1024 {
+                        return bytes * 90 / 100;
                     }
                 }
             }
         }
     }
 
-    // /proc/meminfo but cap at reasonable limit on shared login nodes
+    // /proc/meminfo
     if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if line.starts_with("MemAvailable:") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(kb_str) = parts.get(1) {
                     if let Ok(kb) = kb_str.parse::<u64>() {
-                        return kb * 1024 * 75 / 100;
+                        return kb * 1024 * 90 / 100;
                     }
                 }
             }
         }
     }
 
-    // Fallback: 4GB
     4 * 1024 * 1024 * 1024
 }
 

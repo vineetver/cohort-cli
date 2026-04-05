@@ -1,10 +1,11 @@
 use clap::Parser;
 
 mod cli;
+pub mod column;
 mod commands;
 mod config;
 mod data;
-mod db;
+mod engine;
 mod error;
 mod ingest;
 mod output;
@@ -45,8 +46,8 @@ fn run(
             setup::setup(out, mode, environment, memory_budget)
         }
         Command::Data { action } => data::transfer::run(action, out),
-        Command::Ingest { input, output, emit_sql, build } => {
-            commands::ingest::run(input, output, emit_sql, build, out, dry_run)
+        Command::Ingest { inputs, output, emit_sql, build } => {
+            commands::ingest::run(inputs, output, emit_sql, build, out, dry_run)
         }
         Command::Annotate {
             input,
@@ -75,19 +76,23 @@ fn run(
             window_size,
             individual,
             spa,
-            ancestry_col,
+            ancestry_col: _ancestry_col,
             scang_lmin,
             scang_lmax,
             scang_step,
             known_loci,
             emit_sumstats,
+            rebuild_store,
+            no_store: _no_store,
             adaptive: _adaptive,
+            column_map,
             output: output_path,
         } => commands::staar::run(
             genotypes, phenotype, trait_name, covariates, annotations,
-            masks, maf_cutoff, window_size, individual, spa, ancestry_col,
+            masks, maf_cutoff, window_size, individual, spa,
             scang_lmin, scang_lmax, scang_step,
-            known_loci, emit_sumstats, output_path, out, dry_run,
+            known_loci, emit_sumstats, rebuild_store,
+            column_map, output_path, out, dry_run,
         ),
         Command::MetaStaar {
             studies,

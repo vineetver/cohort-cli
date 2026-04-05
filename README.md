@@ -6,7 +6,7 @@
     <strong>Annotate. Enrich. Analyze. Interpret.</strong>
     <br />
     <br />
-    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="AGENTS.md">Agent Reference</a> &middot; <a href="#roadmap">Roadmap</a>
+    <a href="#install">Install</a> &middot; <a href="#quick-start">Quick Start</a> &middot; <a href="docs/genotype_storage.md">Storage Format</a> &middot; <a href="docs/STAAR_VALIDATION.md">Validation</a> &middot; <a href="AGENTS.md">Agent Reference</a> &middot; <a href="#roadmap">Roadmap</a>
   </p>
 </p>
 
@@ -51,6 +51,20 @@ favor staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
 
 All commands support `--format json` and `--dry-run`. See [AGENTS.md](AGENTS.md) for the machine interface.
 
+## STAAR architecture
+
+Genotypes are stored as a canonical sparse matrix **G** over `(sample_id, variant_vcf)`. All queries — region, gene, MAF, annotation — resolve to aligned vectors over `variant_vcf`. Scoring is carrier-indexed at **O(total_MAC)**, not O(n_samples x n_variants).
+
+| Layer | What | Cache key |
+|-------|------|-----------|
+| **Build** | VCF x annotations -> `sparse_g.bin` + `variants.parquet` + `membership.parquet` | SHA-256(VCF content, annotation content) |
+| **Score cache** | Null model -> U, K per gene | (store key, trait, covariates) |
+| **Test** | Slice cached U/K per mask -> Burden, SKAT, ACAT-V -> omnibus | (mask predicate, MAF cutoff) |
+
+Interactive results: Plotly.js summary with Manhattan, QQ, and volcano plots.
+
+See [docs/genotype_storage.md](docs/genotype_storage.md) for the storage format and [docs/STAAR_VALIDATION.md](docs/STAAR_VALIDATION.md) for validation against the R STAARpipeline.
+
 ## Data packs
 
 | Pack | Size | Description |
@@ -65,12 +79,14 @@ All commands support `--format json` and `--dry-run`. See [AGENTS.md](AGENTS.md)
 
 ## Roadmap
 
-| Feature | What it enables |
-|---------|-----------------|
-| **`favor interpret`** | Variant interpretation — pathogenicity scoring, fine-mapping, variant-to-gene mapping, tissue/cell-type assignment, functional validation (MaveDB, CRISPRi, MPRA) |
-| **Workflow orchestration** | Multi-stage pipelines under Nextflow with DAG scheduling, caching/resume, SLURM sizing from `--dry-run`, HPC/cloud portability |
-| **Lineage and provenance** | Every output traces back to its exact inputs, annotations, parameters, and software versions — reproducible by default |
-| **Closed feedback loop** | Downstream results (STAAR hits, fine-mapped loci) feed back upstream to refine annotations, tighten tissue assignments, and focus interpretation on the variants that matter |
+Tracked in [GitHub Issues](https://github.com/vineetver/favor-cli/issues) with milestones:
+
+| Milestone | Focus |
+|-----------|-------|
+| [v0.2.0](https://github.com/vineetver/favor-cli/milestone/1) | STAAR hardening: GRM, multi-VCF, AI-STAAR, MultiSTAAR, performance |
+| [v0.3.0](https://github.com/vineetver/favor-cli/milestone/2) | MetaSTAAR: cross-biobank meta-analysis |
+| [v0.4.0](https://github.com/vineetver/favor-cli/milestone/3) | Variant interpretation: scoring, fine-mapping, colocalization, V2G |
+| [v1.0.0](https://github.com/vineetver/favor-cli/milestone/4) | Nextflow orchestration, provenance, QC |
 
 ## Citation
 

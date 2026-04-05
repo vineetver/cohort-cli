@@ -1,9 +1,8 @@
 use faer::Mat;
-use statrs::distribution::{ChiSquared, ContinuousCDF};
+use statrs::distribution::{Beta, ChiSquared, Continuous, ContinuousCDF};
 
-use super::null_model::NullModel;
+use super::model::NullModel;
 use super::stats;
-use super::weights;
 
 /// Full STAAR results for one gene: all tests × all annotation channels,
 /// plus per-test omnibus and overall omnibus.
@@ -59,12 +58,11 @@ pub fn run_staar(
     let m = g.ncols();
     if m == 0 { return nan_result(); }
 
-    let pg = null.project(g);
     let u = g.transpose() * &null.residuals;
-    let k = g.transpose() * &pg;
+    let k = null.compute_kernel(g);
     let spa_mu = if use_spa { null.fitted_values.as_deref() } else { None };
 
-    staar_tests(&u, &k, annotation_matrix, mafs, null.sigma2, Some(g), spa_mu)
+    staar_tests(&u, &k, annotation_matrix, mafs, null.sigma2, g.nrows(), Some(g), spa_mu)
 }
 
 /// Burden test with SPA: weighted genotype per sample, then saddlepoint p-value.
@@ -138,18 +136,61 @@ fn skat(u: &Mat<f64>, k: &Mat<f64>, w: &[f64], sigma2: f64, kernel: &mut Mat<f64
     stats::mixture_chisq_pvalue(q, &eigenvalues)
 }
 
-fn acat_v(u: &Mat<f64>, k: &Mat<f64>, w: &[f64], sigma2: f64) -> f64 {
-    let m = w.len();
+/// MAC threshold below which variants are grouped into a single Burden-like
+/// statistic before Cauchy combination. Matches R STAARpipeline's mac_thres=10.
+const MAC_THRESHOLD: f64 = 10.0;
+
+/// ACAT-V with MAC-based grouping of very rare variants.
+///
+/// `w_acat`: ACAT-V weights (for Cauchy combination weights and per-variant variance).
+/// `w_burden`: corresponding Burden weights (for grouped rare variant score).
+/// Matches R STAAR_O_SMMAT.cpp: Burden weights for grouped score, ACAT weights
+/// for the covariance denominator and Cauchy combination.
+fn acat_v(
+    u: &Mat<f64>, k: &Mat<f64>,
+    w_acat: &[f64], w_burden: &[f64],
+    mafs: &[f64], n_samples: usize, sigma2: f64,
+) -> f64 {
+    let m = w_acat.len();
+    let ns = n_samples as f64;
+
     let mut p_values = Vec::with_capacity(m);
     let mut cauchy_weights = Vec::with_capacity(m);
+    let mut rare_indices: Vec<usize> = Vec::new();
+
     for j in 0..m {
-        if w[j] == 0.0 { continue; }
-        let var_j = sigma2 * k[(j, j)];
-        if var_j <= 0.0 { continue; }
-        let t = u[(j, 0)] * u[(j, 0)] / var_j;
-        p_values.push(chisq1_pvalue(t));
-        cauchy_weights.push(w[j]);
+        if w_acat[j] == 0.0 { continue; }
+        let mac = (2.0 * mafs[j] * ns).round();
+        if mac > MAC_THRESHOLD {
+            // Common: individual chi-sq(1) with unweighted score variance
+            let var_j = sigma2 * k[(j, j)];
+            if var_j <= 0.0 { continue; }
+            let t = u[(j, 0)] * u[(j, 0)] / var_j;
+            p_values.push(chisq1_pvalue(t));
+            cauchy_weights.push(w_acat[j]);
+        } else {
+            rare_indices.push(j);
+        }
     }
+
+    // Group very rare variants: Burden-weighted score, ACAT-weighted covariance
+    if !rare_indices.is_empty() {
+        let wu: f64 = rare_indices.iter().map(|&j| w_burden[j] * u[(j, 0)]).sum();
+        let mut wkw = 0.0;
+        for &j in &rare_indices {
+            for &l in &rare_indices {
+                wkw += w_acat[j] * k[(j, l)] * w_acat[l];
+            }
+        }
+        let var = sigma2 * wkw;
+        if var > 0.0 {
+            p_values.push(chisq1_pvalue(wu * wu / var));
+            let mean_w: f64 = rare_indices.iter().map(|&j| w_acat[j]).sum::<f64>()
+                / rare_indices.len() as f64;
+            cauchy_weights.push(mean_w);
+        }
+    }
+
     if p_values.is_empty() { return 1.0; }
     stats::cauchy_combine_weighted(&p_values, &cauchy_weights)
 }
@@ -175,45 +216,22 @@ fn symmetric_eigenvalues(mat: &Mat<f64>) -> Vec<f64> {
     }
 }
 
-pub fn individual_tests(g: &Mat<f64>, null: &NullModel, use_spa: bool) -> Vec<f64> {
-    let m = g.ncols();
-    let n = g.nrows();
-    if m == 0 { return Vec::new(); }
-
-    let spa_mu = if use_spa { null.fitted_values.as_deref() } else { None };
-
-    if let Some(mu) = spa_mu {
-        let u = g.transpose() * &null.residuals;
-        let mut g_col = vec![0.0; n];
-        (0..m).map(|j| {
-            for i in 0..n { g_col[i] = g[(i, j)]; }
-            stats::spa_pvalue(u[(j, 0)], mu, &g_col)
-        }).collect()
-    } else {
-        let pg = null.project(g);
-        let u = g.transpose() * &null.residuals;
-        let s2 = null.sigma2;
-        (0..m).map(|j| {
-            let var_j = s2 * (0..n).map(|i| g[(i, j)] * pg[(i, j)]).sum::<f64>();
-            if var_j <= 0.0 { return 1.0; }
-            chisq1_pvalue(u[(j, 0)] * u[(j, 0)] / var_j)
-        }).collect()
-    }
-}
-
 /// Run STAAR from pre-computed U and K (for MetaSTAAR).
 ///
 /// Both U and K must be pre-scaled by 1/σ² (matching R MetaSTAAR convention).
 /// The test functions receive sigma2=1.0 since the scaling is already applied.
 /// SPA is unavailable without raw genotypes; uses chi-squared throughout.
+/// `n_total` is the merged sample count across studies — needed for MAC-based
+/// ACAT-V grouping of very rare variants.
 pub fn run_staar_from_sumstats(
     u: &Mat<f64>,
     k: &Mat<f64>,
     annotation_matrix: &[Vec<f64>],
     mafs: &[f64],
+    n_total: usize,
 ) -> StaarResult {
     if u.nrows() == 0 { return nan_result(); }
-    staar_tests(u, k, annotation_matrix, mafs, 1.0, None, None)
+    staar_tests(u, k, annotation_matrix, mafs, 1.0, n_total, None, None)
 }
 
 /// Shared test engine for both single-study and meta-analysis paths.
@@ -221,13 +239,13 @@ pub fn run_staar_from_sumstats(
 fn staar_tests(
     u: &Mat<f64>, k: &Mat<f64>,
     annotation_matrix: &[Vec<f64>], mafs: &[f64],
-    sigma2: f64,
+    sigma2: f64, n_samples: usize,
     g_for_spa: Option<&Mat<f64>>, spa_mu: Option<&[f64]>,
 ) -> StaarResult {
-    let beta_1_25: Vec<f64> = mafs.iter().map(|&maf| weights::beta_density_weight(maf, 1.0, 25.0)).collect();
-    let beta_1_1: Vec<f64> = mafs.iter().map(|&maf| weights::beta_density_weight(maf, 1.0, 1.0)).collect();
+    let beta_1_25: Vec<f64> = mafs.iter().map(|&maf| beta_density_weight(maf, 1.0, 25.0)).collect();
+    let beta_1_1: Vec<f64> = mafs.iter().map(|&maf| beta_density_weight(maf, 1.0, 1.0)).collect();
     let acat_denom: Vec<f64> = mafs.iter().map(|&maf| {
-        let d = weights::beta_density_weight(maf, 0.5, 0.5);
+        let d = beta_density_weight(maf, 0.5, 0.5);
         if d > 0.0 { d * d } else { 1.0 }
     }).collect();
 
@@ -237,10 +255,10 @@ fn staar_tests(
             _ => burden(u, k, w, sigma2),
         }
     };
-    let run_acat_v = |w: &[f64]| -> f64 {
+    let run_acat_v = |w_acat: &[f64], w_burden: &[f64]| -> f64 {
         match (g_for_spa, spa_mu) {
-            (Some(g), Some(mu)) => acat_v_spa(g, u, w, mu),
-            _ => acat_v(u, k, w, sigma2),
+            (Some(g), Some(mu)) => acat_v_spa(g, u, w_acat, mu),
+            _ => acat_v(u, k, w_acat, w_burden, mafs, n_samples, sigma2),
         }
     };
 
@@ -253,8 +271,8 @@ fn staar_tests(
     let base_skat_1_1 = skat(u, k, &beta_1_1, sigma2, &mut kernel_buf);
     let wa_base_1_25: Vec<f64> = beta_1_25.iter().zip(&acat_denom).map(|(b, d)| b * b / d).collect();
     let wa_base_1_1: Vec<f64> = beta_1_1.iter().zip(&acat_denom).map(|(b, d)| b * b / d).collect();
-    let base_acat_v_1_25 = run_acat_v(&wa_base_1_25);
-    let base_acat_v_1_1 = run_acat_v(&wa_base_1_1);
+    let base_acat_v_1_25 = run_acat_v(&wa_base_1_25, &beta_1_25);
+    let base_acat_v_1_1 = run_acat_v(&wa_base_1_1, &beta_1_1);
 
     let acat_o = stats::cauchy_combine(&[
         base_burden_1_25, base_burden_1_1,
@@ -295,7 +313,7 @@ fn staar_tests(
         let p = [
             run_burden(&wb_1_25), run_burden(&wb_1_1),
             skat(u, k, &ws_1_25, sigma2, &mut kernel_buf), skat(u, k, &ws_1_1, sigma2, &mut kernel_buf),
-            run_acat_v(&wa_1_25), run_acat_v(&wa_1_1),
+            run_acat_v(&wa_1_25, &wb_1_25), run_acat_v(&wa_1_1, &wb_1_1),
         ];
         for i in 0..6 { by_test[i].push(p[i]); }
         per_annotation.push(p);
@@ -338,5 +356,28 @@ fn nan_result() -> StaarResult {
         staar_a_1_25: f64::NAN, staar_a_1_1: f64::NAN,
         acat_o: f64::NAN,
         staar_o: f64::NAN,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Beta density weights
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Beta density weight: dbeta(maf, a1, a2).
+///
+/// For beta(1,25): upweights ultra-rare variants (MAF near 0).
+/// For beta(1,1): uniform weight = 1.0 for all MAFs in (0,1).
+///
+/// Returns 0.0 for maf=0 or maf≥0.5 (monomorphic or not minor).
+pub fn beta_density_weight(maf: f64, a1: f64, a2: f64) -> f64 {
+    if maf <= 0.0 || maf >= 0.5 || !maf.is_finite() {
+        return 0.0;
+    }
+    if (a1 - 1.0).abs() < 1e-10 && (a2 - 1.0).abs() < 1e-10 {
+        return 1.0;
+    }
+    match Beta::new(a1, a2) {
+        Ok(dist) => dist.pdf(maf),
+        Err(_) => 0.0,
     }
 }

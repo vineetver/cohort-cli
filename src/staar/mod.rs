@@ -1,16 +1,21 @@
 pub mod ancestry;
+pub mod carrier;
 pub mod genotype;
+pub mod sparse_g;
+pub mod sparse_g_writer;
+#[cfg(test)]
+mod ground_truth_tests;
 pub mod masks;
 pub mod meta;
+pub mod model;
 pub mod multi;
-pub mod null_model;
-pub mod phenotype;
-pub mod results;
+pub mod output;
+pub mod pipeline;
 pub mod score;
+pub mod score_cache;
 pub mod stats;
-pub mod summary;
-pub mod sumstats;
-pub mod weights;
+pub mod store;
+pub mod store_validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraitType {
@@ -86,11 +91,13 @@ impl MaskType {
     }
 }
 
+use crate::types::Chromosome;
+
 #[derive(Debug, Clone)]
 pub struct GeneResult {
     pub ensembl_id: String,
     pub gene_symbol: String,
-    pub chromosome: String,
+    pub chromosome: Chromosome,
     pub start: u32,
     pub end: u32,
     pub n_variants: u32,

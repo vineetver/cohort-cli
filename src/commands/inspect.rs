@@ -1,11 +1,11 @@
 use serde_json::json;
 
+use parquet::file::reader::FileReader;
+
 use crate::config::{Config, DirProbe, Tier};
 use crate::data::AnnotationDb;
-use crate::db::DuckEngine;
 use crate::error::FavorError;
 use crate::output::Output;
-use crate::resource::Resources;
 
 // ---------------------------------------------------------------------------
 // Schema (was commands/schema_cmd.rs)
@@ -13,13 +13,12 @@ use crate::resource::Resources;
 
 pub fn schema(table: Option<String>, out: &dyn Output) -> Result<(), FavorError> {
     let config = Config::load_configured()?;
-    let resources = Resources::detect_with_config(&config.resources);
 
     match table.as_deref() {
         None => list_tables(&config, out),
-        Some("base") => describe_tier(&config, Tier::Base, &resources, out),
-        Some("full") => describe_tier(&config, Tier::Full, &resources, out),
-        Some(name) => describe_tissue_table(&config, name, &resources, out),
+        Some("base") => describe_tier(&config, Tier::Base, out),
+        Some("full") => describe_tier(&config, Tier::Full, out),
+        Some(name) => describe_tissue_table(&config, name, out),
     }
 }
 
@@ -70,10 +69,9 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), FavorError> {
 fn describe_tier(
     config: &Config,
     tier: Tier,
-    resources: &Resources,
     out: &dyn Output,
 ) -> Result<(), FavorError> {
-    let ann_db = AnnotationDb::open_tier(config, tier)?;
+    let ann_db = AnnotationDb::open_tier(tier, &config.root_dir())?;
     let sample = match ann_db.chrom_parquet("1") {
         Some(p) => p,
         None => return Err(FavorError::DataMissing(format!(
@@ -83,8 +81,7 @@ fn describe_tier(
         ))),
     };
 
-    let engine = DuckEngine::new(resources)?;
-    let columns = describe_parquet(&engine, &sample.to_string_lossy())?;
+    let columns = describe_parquet(&sample)?;
 
     for col in &columns {
         out.status(&format!("{}: {}", col.name, col.col_type));
@@ -103,7 +100,6 @@ fn describe_tier(
 fn describe_tissue_table(
     config: &Config,
     name: &str,
-    resources: &Resources,
     out: &dyn Output,
 ) -> Result<(), FavorError> {
     let table_dir = config.tissue_dir().join(name);
@@ -115,8 +111,7 @@ fn describe_tissue_table(
     }
 
     let sample = find_first_parquet(&table_dir)?;
-    let engine = DuckEngine::new(resources)?;
-    let columns = describe_parquet(&engine, &sample.to_string_lossy())?;
+    let columns = describe_parquet(&sample)?;
 
     for col in &columns {
         out.status(&format!("{}: {}", col.name, col.col_type));
@@ -137,34 +132,25 @@ struct ColumnInfo {
     col_type: String,
 }
 
-fn describe_parquet(engine: &DuckEngine, path: &str) -> Result<Vec<ColumnInfo>, FavorError> {
-    let sql = format!("DESCRIBE SELECT * FROM read_parquet('{}')", path);
-    let conn = engine.connection();
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| FavorError::Analysis(format!("DESCRIBE failed: {e}")))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| FavorError::Analysis(format!("DESCRIBE failed: {e}")))?;
-
-    let mut columns = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| FavorError::Analysis(format!("{e}")))?
-    {
-        let name: String = row
-            .get(0)
-            .map_err(|e| FavorError::Analysis(format!("{e}")))?;
-        let col_type: String = row
-            .get(1)
-            .map_err(|e| FavorError::Analysis(format!("{e}")))?;
-        columns.push(ColumnInfo { name, col_type });
-    }
-    Ok(columns)
+fn describe_parquet(path: &std::path::Path) -> Result<Vec<ColumnInfo>, FavorError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| FavorError::Resource(format!("Cannot open {}: {e}", path.display())))?;
+    let reader = parquet::file::reader::SerializedFileReader::new(file)
+        .map_err(|e| FavorError::Resource(format!("Bad parquet {}: {e}", path.display())))?;
+    let schema = reader.metadata().file_metadata().schema_descr();
+    Ok(schema.columns().iter().map(|c| {
+        ColumnInfo {
+            name: c.name().to_string(),
+            col_type: format!("{:?}", c.physical_type()),
+        }
+    }).collect())
 }
 
 fn find_first_parquet(table_dir: &std::path::Path) -> Result<std::path::PathBuf, FavorError> {
-    let entries: Vec<_> = std::fs::read_dir(table_dir)?
+    let entries: Vec<_> = std::fs::read_dir(table_dir)
+        .map_err(|e| FavorError::Resource(format!(
+            "Cannot read directory '{}': {e}", table_dir.display()
+        )))?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name();

@@ -1,39 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::json;
 
-use crate::commands;
+use crate::column::Col;
+use crate::commands::{self, EnrichConfig};
 use crate::config::Config;
-use crate::db::DuckEngine;
-use crate::db::{query_scalar, query_strings};
+use crate::data::{parquet_row_count, AnnotatedSet, TissueDb};
+use crate::engine::DfEngine;
 use crate::error::FavorError;
 use crate::output::Output;
 use crate::resource::Resources;
-use crate::data::VariantSet;
 
-struct EnrichTable {
-    dir: &'static str,
-    name: &'static str,
-    has_tissue: bool,
-}
-
-const VARIANT_TABLES: &[EnrichTable] = &[
-    EnrichTable { dir: "variant_eqtl",               name: "eqtl",                has_tissue: true },
-    EnrichTable { dir: "variant_sqtl",               name: "sqtl",                has_tissue: true },
-    EnrichTable { dir: "variant_apaqtl",             name: "apaqtl",              has_tissue: true },
-    EnrichTable { dir: "variant_eqtl_susie",         name: "eqtl_susie",          has_tissue: true },
-    EnrichTable { dir: "variant_eqtl_catalogue",     name: "eqtl_catalogue",      has_tissue: true },
-    EnrichTable { dir: "variant_sc_eqtl",            name: "sc_eqtl",             has_tissue: true },
-    EnrichTable { dir: "variant_sc_eqtl_dice",       name: "sc_eqtl_dice",        has_tissue: true },
-    EnrichTable { dir: "variant_sc_eqtl_psychencode",name: "sc_eqtl_psychencode", has_tissue: true },
-    EnrichTable { dir: "variant_tissue_scores",      name: "tissue_scores",       has_tissue: true },
-    EnrichTable { dir: "variant_chrombpnet",         name: "chrombpnet",           has_tissue: true },
-    EnrichTable { dir: "variant_allelic_imbalance",  name: "allelic_imbalance",    has_tissue: true },
-    EnrichTable { dir: "variant_allelic_methylation", name: "allelic_methylation",  has_tissue: true },
-    EnrichTable { dir: "variant_eqtl_ccre",          name: "eqtl_ccre",           has_tissue: true },
-];
-
-pub fn run(
+/// Entry point from CLI dispatch. Validates raw args, builds typed config, delegates to `run_enrich`.
+pub fn handle(
     input: PathBuf,
     tissue: String,
     output_path: Option<PathBuf>,
@@ -41,102 +20,172 @@ pub fn run(
     dry_run: bool,
 ) -> Result<(), FavorError> {
     if !input.exists() {
-        return Err(FavorError::Input(format!("Not found: {}", input.display())));
-    }
-
-    let input_vs = VariantSet::open(&input)?;
-    if !input_vs.has_column("vid") {
-        return Err(FavorError::Input(
-            "Input has no 'vid' column. Run `favor annotate` first.".into()
-        ));
-    }
-    let input_count = input_vs.count() as i64;
-
-    let config = Config::load_configured()?;
-    let tissue_dir = config.tissue_dir();
-
-    if !tissue_dir.exists() {
-        return Err(FavorError::DataMissing(format!(
-            "Tissue data not found at {}. Run `favor data pull --pack eqtl` first.",
-            tissue_dir.display()
+        return Err(FavorError::Input(format!(
+            "Annotated variant set not found: '{}'. Run `favor annotate` first.",
+            input.display()
         )));
     }
 
-    let output_dir = output_path.unwrap_or_else(|| {
+    let global_config = Config::load_configured()?;
+
+    let output = output_path.unwrap_or_else(|| {
         let name = input.file_name().unwrap_or_default().to_string_lossy();
         let stem = name.strip_suffix(".annotated").or_else(|| name.strip_suffix("/"))
             .unwrap_or(&name);
         input.parent().unwrap_or(&input).join(format!("{stem}.enriched"))
     });
-    std::fs::create_dir_all(&output_dir)?;
 
-    let resources = Resources::detect_with_config(&config.resources);
-    let engine = DuckEngine::new(&resources)?;
+    let config = EnrichConfig {
+        input,
+        output,
+        tissue_name: tissue,
+        tissue_dir: global_config.tissue_dir(),
+    };
 
-    out.status(&format!("Input: {} variants", input_count));
+    if dry_run {
+        return emit_dry_run(&config, out);
+    }
 
+    run_enrich(&config, out)
+}
+
+/// Backward-compatible entry point -- delegates to `handle`.
+pub fn run(
+    input: PathBuf,
+    tissue: String,
+    output_path: Option<PathBuf>,
+    out: &dyn Output,
+    dry_run: bool,
+) -> Result<(), FavorError> {
+    handle(input, tissue, output_path, out, dry_run)
+}
+
+fn emit_dry_run(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorError> {
+    let annotated = AnnotatedSet::open(&config.input)?;
+    let tissue_db = TissueDb::open(&config.tissue_dir)?;
+    let available_tables: Vec<&str> = tissue_db.available_tables().iter()
+        .map(|t| t.display_name())
+        .collect();
+    let plan = commands::DryRunPlan {
+        command: "enrich".into(),
+        inputs: json!({
+            "file": config.input.to_string_lossy(),
+            "variant_count": annotated.variant_count(),
+            "tissue": config.tissue_name,
+            "available_tables": available_tables,
+        }),
+        memory: commands::MemoryEstimate::default_estimate(),
+        output_path: config.output.to_string_lossy().into(),
+    };
+    commands::emit(&plan, out);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Core pipeline
+// ---------------------------------------------------------------------------
+
+/// Core enrich pipeline: open → validate → resolve tissue → join tables → report.
+pub fn run_enrich(config: &EnrichConfig, out: &dyn Output) -> Result<(), FavorError> {
+    let annotated = AnnotatedSet::open(&config.input)?;
+    annotated.supports(&[Col::Vid])?;
+    let tissue_db = TissueDb::open(&config.tissue_dir)?;
+    let resources = Resources::detect_configured();
+    let engine = DfEngine::new(&resources)?;
+
+    out.status(&format!("Input: {} variants", annotated.variant_count()));
+    out.status(&format!("Resources: {}, {} threads ({})",
+        resources.memory_human(), resources.threads, resources.environment()));
+
+    let resolved = resolve_tissue(&engine, &config.tissue_dir, &config.tissue_name)?;
+    out.status(&format!("Tissue '{}' -> {} subtissues", config.tissue_name, resolved.len()));
+
+    std::fs::create_dir_all(&config.output)
+        .map_err(|e| FavorError::Resource(format!("Cannot create '{}': {e}", config.output.display())))?;
+
+    let tables_written = run_enrichment(&annotated, &tissue_db, &resolved, &engine, &config.output, out)?;
+    write_meta(&tables_written, &resolved, config, annotated.variant_count() as i64, out);
+    report_result(&tables_written, config, annotated.variant_count() as i64, out);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tissue resolution
+// ---------------------------------------------------------------------------
+
+fn resolve_tissue(
+    engine: &DfEngine,
+    tissue_dir: &std::path::Path,
+    tissue_query: &str,
+) -> Result<Vec<String>, FavorError> {
     let tissue_vocab_path = tissue_dir.join("reference/tissue_vocab.parquet");
-    let resolved_tissues = resolve_tissue(&engine, &tissue_vocab_path, &tissue)?;
+    if !tissue_vocab_path.exists() {
+        return Ok(vec![tissue_query.to_string()]);
+    }
 
-    if resolved_tissues.is_empty() {
-        let groups = list_tissue_groups(&engine, &tissue_vocab_path)?;
+    engine.register_parquet_file("_tissue_vocab", &tissue_vocab_path)?;
+
+    let escaped = tissue_query.replace('\'', "''");
+    let resolved = engine.query_strings(&format!(
+        "SELECT DISTINCT tissue_norm FROM _tissue_vocab \
+         WHERE tissue_group ILIKE '%{escaped}%' \
+            OR tissue_norm ILIKE '%{escaped}%' \
+            OR tissue_raw ILIKE '%{escaped}%'"
+    ))?;
+
+    if resolved.is_empty() {
+        let groups = engine.query_strings(
+            "SELECT DISTINCT tissue_group FROM _tissue_vocab ORDER BY tissue_group"
+        ).unwrap_or_default();
         return Err(FavorError::Input(format!(
             "Unknown tissue '{}'. Available groups: {}",
-            tissue, groups.join(", ")
+            tissue_query, groups.join(", ")
         )));
     }
 
-    out.status(&format!("Tissue '{}' → {} subtissues", tissue, resolved_tissues.len()));
+    Ok(resolved)
+}
 
-    if dry_run {
-        let available_tables: Vec<&str> = VARIANT_TABLES.iter()
-            .filter(|t| tissue_dir.join(t.dir).is_dir())
-            .map(|t| t.name)
-            .collect();
-        let plan = commands::DryRunPlan {
-            command: "enrich".into(),
-            inputs: json!({
-                "file": input.to_string_lossy(),
-                "variant_count": input_count,
-                "tissue": tissue,
-                "resolved_tissues": resolved_tissues,
-                "available_tables": available_tables,
-            }),
-            memory: commands::MemoryEstimate::duckdb_only(),
-            output_path: output_dir.to_string_lossy().into(),
-        };
-        commands::emit(&plan, out);
-        return Ok(());
-    }
+// ---------------------------------------------------------------------------
+// Enrichment join
+// ---------------------------------------------------------------------------
 
+fn run_enrichment(
+    annotated: &AnnotatedSet,
+    tissue_db: &TissueDb,
+    resolved_tissues: &[String],
+    engine: &DfEngine,
+    output_dir: &std::path::Path,
+    out: &dyn Output,
+) -> Result<Vec<(String, i64)>, FavorError> {
     let tissue_filter: String = resolved_tissues.iter()
         .map(|t| format!("'{}'", t.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
 
-    let read_all = input_vs.read_all();
-
+    // Write annotated pass-through
+    engine.register_parquet_dir("_input", annotated.root())?;
     let annotated_out = output_dir.join("annotated.parquet");
     engine.execute(&format!(
-        "COPY (SELECT * FROM {read_all}) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD);",
+        "COPY (SELECT * FROM _input) TO '{}' STORED AS PARQUET OPTIONS (compression 'zstd(4)')",
         annotated_out.display(),
     ))?;
-    out.status(&format!("  annotated.parquet ({} variants)", input_count));
+    out.status(&format!("  annotated.parquet ({} variants)", annotated.variant_count()));
 
-    engine.execute(&format!(
-        "CREATE TEMP TABLE _input_vids AS SELECT DISTINCT vid FROM {read_all}",
-    ))?;
+    engine.execute("CREATE TABLE _input_vids AS SELECT DISTINCT vid FROM _input")?;
 
     let mut tables_written: Vec<(String, i64)> = Vec::new();
 
-    for table in VARIANT_TABLES {
-        let table_path = tissue_dir.join(table.dir);
-        if !table_path.is_dir() { continue; }
+    for &table in tissue_db.available_tables() {
+        let table_path = tissue_db.table_path(table);
+        let table_name = format!("_enrich_{}", table.display_name());
+        if engine.register_parquet_dir(&table_name, &table_path).is_err() {
+            continue;
+        }
 
-        let glob = format!("{}/chrom_id=*/data_0.parquet", table_path.display());
-        let out_path = output_dir.join(format!("{}.parquet", table.name));
+        let out_path = output_dir.join(format!("{}.parquet", table.display_name()));
 
-        let where_clause = if table.has_tissue {
+        let where_clause = if table.has_tissue_filter() {
             format!("WHERE t.vid IN (SELECT vid FROM _input_vids) \
                      AND t.tissue_name IN ({tissue_filter})")
         } else {
@@ -145,50 +194,53 @@ pub fn run(
 
         let sql = format!(
             "COPY (\
-                SELECT t.* EXCLUDE (chrom_id) \
-                FROM read_parquet('{glob}', hive_partitioning=true) t \
+                SELECT t.* EXCEPT(chrom_id) \
+                FROM {table_name} t \
                 {where_clause}\
-            ) TO '{out_path}' (FORMAT PARQUET, COMPRESSION ZSTD);",
-            glob = glob,
-            where_clause = where_clause,
+            ) TO '{out_path}' STORED AS PARQUET OPTIONS (compression 'zstd(4)')",
             out_path = out_path.display(),
         );
 
-        out.status(&format!("  {}: joining...", table.name));
+        out.status(&format!("  {}: joining...", table.display_name()));
         if let Err(e) = engine.execute(&sql) {
-            out.warn(&format!("  {}: skipped ({e})", table.name));
+            out.warn(&format!("  {}: skipped ({e})", table.display_name()));
             continue;
         }
 
-        let row_count = query_scalar(&engine, &format!(
-            "SELECT COUNT(*) FROM read_parquet('{}')", out_path.display()
-        )).unwrap_or(0);
+        let row_count = if out_path.exists() {
+            parquet_row_count(&out_path).unwrap_or(0) as i64
+        } else {
+            0
+        };
 
         if row_count == 0 {
             let _ = std::fs::remove_file(&out_path);
         } else {
-            out.status(&format!("  {}.parquet ({} rows)", table.name, row_count));
-            tables_written.push((table.name.to_string(), row_count));
+            out.status(&format!("  {}.parquet ({} rows)", table.display_name(), row_count));
+            tables_written.push((table.display_name().to_string(), row_count));
         }
     }
 
-    let _ = engine.execute("DROP TABLE IF EXISTS _input_vids");
+    Ok(tables_written)
+}
 
-    if tables_written.is_empty() {
-        out.warn("No enrichment data found for these variants in this tissue.");
-    } else {
-        out.success(&format!(
-            "Enriched → {} ({} tables)",
-            output_dir.display(), tables_written.len(),
-        ));
-    }
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
 
+fn write_meta(
+    tables_written: &[(String, i64)],
+    resolved_tissues: &[String],
+    config: &EnrichConfig,
+    input_count: i64,
+    out: &dyn Output,
+) {
     let meta = json!({
         "favor_enrich_version": 2,
-        "source": input.to_string_lossy(),
-        "tissue": tissue,
+        "source": config.input.to_string_lossy(),
+        "tissue": config.tissue_name,
         "resolved_tissues": resolved_tissues,
-        "output_dir": output_dir.to_string_lossy(),
+        "output_dir": config.output.to_string_lossy(),
         "tables": tables_written.iter()
             .map(|(name, rows)| json!({"name": name, "rows": rows}))
             .collect::<Vec<_>>(),
@@ -196,56 +248,35 @@ pub fn run(
         "join_key": "vid",
         "usage": "SELECT a.*, e.* FROM 'annotated.parquet' a INNER JOIN 'eqtl.parquet' e ON a.vid = e.vid",
     });
-    let meta_path = output_dir.join("enriched.meta.json");
+    let meta_path = config.output.join("enriched.meta.json");
     if let Ok(json_str) = serde_json::to_string_pretty(&meta) {
         let _ = std::fs::write(&meta_path, json_str);
+    }
+    let _ = out; // suppress unused warning — meta is written to disk
+}
+
+fn report_result(
+    tables_written: &[(String, i64)],
+    config: &EnrichConfig,
+    input_count: i64,
+    out: &dyn Output,
+) {
+    if tables_written.is_empty() {
+        out.warn("No enrichment data found for these variants in this tissue.");
+    } else {
+        out.success(&format!(
+            "Enriched -> {} ({} tables)",
+            config.output.display(), tables_written.len(),
+        ));
     }
 
     out.result_json(&json!({
         "status": "ok",
-        "output_dir": output_dir.to_string_lossy(),
+        "output_dir": config.output.to_string_lossy(),
         "tables": tables_written.iter()
             .map(|(name, rows)| json!({"name": name, "rows": rows}))
             .collect::<Vec<_>>(),
-        "tissue": tissue,
+        "tissue": config.tissue_name,
         "input_count": input_count,
     }));
-
-    Ok(())
-}
-
-fn resolve_tissue(
-    engine: &DuckEngine,
-    tissue_vocab_path: &Path,
-    tissue_query: &str,
-) -> Result<Vec<String>, FavorError> {
-    if !tissue_vocab_path.exists() {
-        return Ok(vec![tissue_query.to_string()]);
-    }
-
-    let escaped = tissue_query.replace('\'', "''");
-
-    let sql = format!(
-        "SELECT DISTINCT tissue_norm FROM read_parquet('{}') \
-         WHERE tissue_group ILIKE '%{escaped}%' \
-            OR tissue_norm ILIKE '%{escaped}%' \
-            OR tissue_raw ILIKE '%{escaped}%'",
-        tissue_vocab_path.display(),
-    );
-
-    query_strings(engine, &sql)
-}
-
-fn list_tissue_groups(
-    engine: &DuckEngine,
-    tissue_vocab_path: &Path,
-) -> Result<Vec<String>, FavorError> {
-    if !tissue_vocab_path.exists() {
-        return Ok(vec!["(tissue_vocab.parquet not found)".into()]);
-    }
-
-    query_strings(engine, &format!(
-        "SELECT DISTINCT tissue_group FROM read_parquet('{}') ORDER BY tissue_group",
-        tissue_vocab_path.display(),
-    ))
 }

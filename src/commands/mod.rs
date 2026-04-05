@@ -10,11 +10,47 @@ pub mod staar;
 // Dry-run plan types (was commands/dry_run.rs)
 // ---------------------------------------------------------------------------
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::config::Tier;
 use crate::output::Output;
+use crate::staar::MaskCategory;
+
+// ---------------------------------------------------------------------------
+// Config structs — the ONLY way to configure each command.
+// Constructed from clap args in the command handler, never leaks raw CLI args.
+// ---------------------------------------------------------------------------
+
+pub struct IngestConfig {
+    pub inputs: Vec<PathBuf>,
+    pub output: PathBuf,
+    pub emit_sql: bool,
+    pub build_override: Option<crate::cli::GenomeBuild>,
+}
+
+pub struct AnnotateConfig {
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub tier: Tier,
+    pub data_root: PathBuf,
+}
+
+pub struct EnrichConfig {
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub tissue_name: String,
+    pub tissue_dir: PathBuf,
+}
+
+pub struct MetaStaarConfig {
+    pub study_dirs: Vec<PathBuf>,
+    pub mask_categories: Vec<MaskCategory>,
+    pub maf_cutoff: f64,
+    pub window_size: u32,
+    pub output_dir: PathBuf,
+}
 
 const GB: u64 = 1024 * 1024 * 1024;
 
@@ -35,8 +71,8 @@ pub struct MemoryEstimate {
 }
 
 impl MemoryEstimate {
-    /// For DuckDB-only commands: any memory works (DuckDB spills to disk).
-    pub fn duckdb_only() -> Self {
+    /// Default estimate: engine will spill to disk if needed.
+    pub fn default_estimate() -> Self {
         Self {
             minimum: "4G".into(),
             recommended: "16G".into(),

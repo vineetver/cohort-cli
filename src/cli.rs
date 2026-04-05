@@ -63,14 +63,15 @@ pub enum Command {
 
     /// Ingest variants: auto-detect format, normalize, output parquet
     Ingest {
-        /// Input file (VCF, TSV, CSV, parquet)
-        input: PathBuf,
+        /// Input file(s) or directory (VCF, TSV, CSV, parquet)
+        #[arg(required = true, num_args = 1..)]
+        inputs: Vec<PathBuf>,
 
         /// Output directory [default: <input_stem>.ingested/]
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Emit a DuckDB SQL script instead of running it (for editing)
+        /// Emit a SQL script instead of running it (for editing)
         #[arg(long)]
         emit_sql: bool,
 
@@ -191,9 +192,21 @@ pub enum Command {
         #[arg(long)]
         emit_sumstats: bool,
 
+        /// Force rebuild the genotype store even if a valid cache exists
+        #[arg(long)]
+        rebuild_store: bool,
+
+        /// Skip genotype store entirely (no caching, one-off analysis)
+        #[arg(long)]
+        no_store: bool,
+
         /// Use feedback loop: load priors from prior runs, record results for future runs
         #[arg(long)]
         adaptive: bool,
+
+        /// Column name mapping for phenotype file (key=value pairs, e.g. id=IID,trait=BMI)
+        #[arg(long, value_delimiter = ',')]
+        column_map: Vec<String>,
 
         /// Output directory
         #[arg(short, long)]

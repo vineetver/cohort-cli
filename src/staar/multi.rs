@@ -1,6 +1,6 @@
 use faer::Mat;
 
-use super::null_model::NullModel;
+use super::model::NullModel;
 use super::score::{self, StaarResult};
 use super::stats;
 
@@ -54,7 +54,7 @@ pub fn run_multi_staar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::null_model;
+    use super::super::model;
 
     fn make_test_data() -> (Mat<f64>, Vec<Vec<f64>>, Vec<f64>, Mat<f64>, Mat<f64>) {
         let n = 50;
@@ -89,8 +89,8 @@ mod tests {
             x
         };
 
-        let null1 = null_model::fit_glm(&y1, &x);
-        let null2 = null_model::fit_glm(&y2, &x);
+        let null1 = model::fit_glm(&y1, &x);
+        let null2 = model::fit_glm(&y2, &x);
         let nulls: Vec<&NullModel> = vec![&null1, &null2];
 
         let result = run_multi_staar(&g, &ann, &mafs, &nulls, false);
@@ -110,7 +110,7 @@ mod tests {
             x
         };
 
-        let null = null_model::fit_glm(&y1, &x);
+        let null = model::fit_glm(&y1, &x);
         let single = score::run_staar(&g, &ann, &mafs, &null, false);
         let multi = run_multi_staar(&g, &ann, &mafs, &[&null], false);
 

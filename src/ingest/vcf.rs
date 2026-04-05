@@ -7,8 +7,9 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
+use std::io::{BufRead, BufReader};
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{Int32Builder, StringBuilder};
@@ -21,6 +22,26 @@ use parquet::file::properties::WriterProperties;
 use crate::error::FavorError;
 use crate::output::Output;
 use crate::data::VariantSetWriter;
+
+/// Open a VCF (plain or BGZF-compressed) for buffered reading.
+/// For BGZF files, `threads` decompression workers run in parallel.
+pub fn open_vcf(path: &Path, threads: usize) -> Result<Box<dyn BufRead + Send>, FavorError> {
+    let is_bgzf = path.extension().map(|e| e == "gz" || e == "bgz").unwrap_or(false);
+    let file = File::open(path)
+        .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", path.display())))?;
+
+    if is_bgzf {
+        // threads.max(1) is always >= 1, so NonZeroUsize::new cannot fail
+        let workers = NonZeroUsize::new(threads.max(1)).unwrap();
+        let bgzf = noodles_bgzf::reader::Builder::default()
+            .set_worker_count(workers)
+            .build_from_reader(file);
+        // noodles_bgzf::Reader implements BufRead — do not double-buffer.
+        Ok(Box::new(bgzf))
+    } else {
+        Ok(Box::new(BufReader::with_capacity(256 * 1024, file)))
+    }
+}
 
 /// Bytes per variant in a batch: 7 columns × ~20 bytes average.
 const BYTES_PER_VARIANT: u64 = 140;
@@ -134,7 +155,7 @@ impl BatchBuilder {
 /// Normalize a chromosome name: strip "chr" prefix, M→MT, 23→X, etc.
 /// Returns None for non-standard contigs (filtered out).
 pub fn normalize_chrom(raw: &str) -> Option<&'static str> {
-    let stripped = if raw.starts_with("chr") || raw.starts_with("Chr") || raw.starts_with("CHR") {
+    let stripped = if raw.len() >= 3 && raw[..3].eq_ignore_ascii_case("chr") {
         &raw[3..]
     } else {
         raw
@@ -298,29 +319,25 @@ struct ChromWriter {
     count: u64,
 }
 
-/// Stream a VCF file to per-chromosome parquet files. Handles .vcf and .vcf.gz (bgzf).
+/// Stream one or more VCF files to per-chromosome parquet files.
+/// All files share the same set of per-chromosome writers, so blocks from
+/// different files (e.g., UKB b0-b22) merge into the correct chromosome output.
 /// Bounded memory: 25 chromosome writers max, each with adaptive batch size.
-pub fn ingest_vcf(
-    input_path: &Path,
+pub fn ingest_vcfs(
+    input_paths: &[PathBuf],
     vs_writer: &mut VariantSetWriter,
     memory_budget: u64,
+    threads: usize,
     output: &dyn Output,
 ) -> Result<VcfIngestResult, FavorError> {
-    // 25 chromosomes max (1-22, X, Y, MT). Divide budget across writers.
-    let batch_size = derive_batch_size(memory_budget / 25);
-    output.status(&format!("  Batch size: {} variants/chrom (from {:.1}G budget)",
+    let batch_size = derive_batch_size(memory_budget);
+    output.status(&format!("  Batch size: {} variants/chrom ({:.1}G memory)",
         batch_size, memory_budget as f64 / (1024.0 * 1024.0 * 1024.0)));
-
-    let is_bgzf = input_path.to_string_lossy().ends_with(".gz")
-        || input_path.to_string_lossy().ends_with(".bgz");
-
-    let file = File::open(input_path)
-        .map_err(|e| FavorError::Input(format!("Cannot open '{}': {e}", input_path.display())))?;
 
     let schema = Arc::new(vcf_schema());
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_size(batch_size)
+        .set_max_row_group_row_count(Some(batch_size))
         .build();
 
     let mut writers: HashMap<&'static str, ChromWriter> = HashMap::new();
@@ -328,31 +345,33 @@ pub fn ingest_vcf(
     let mut filtered_contigs: u64 = 0;
     let mut multiallelic_split: u64 = 0;
 
-    macro_rules! ingest_records {
-        ($reader:expr) => {{
-            let mut vcf_reader = noodles_vcf::io::Reader::new($reader);
-            let header = vcf_reader.read_header()
-                .map_err(|e| FavorError::Input(format!("Invalid VCF header: {e}")))?;
+    for (file_idx, input_path) in input_paths.iter().enumerate() {
+        if input_paths.len() > 1 {
+            output.status(&format!("  File {}/{}: {}",
+                file_idx + 1, input_paths.len(),
+                input_path.file_name().unwrap_or_default().to_string_lossy()));
+        }
 
-            for result in vcf_reader.records() {
-                let record = result
-                    .map_err(|e| FavorError::Analysis(format!("VCF parse error: {e}")))?;
+        let reader = open_vcf(input_path, threads)?;
+        let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
+        let header = vcf_reader.read_header()
+            .map_err(|e| FavorError::Input(format!(
+                "Invalid VCF header in {}: {e}", input_path.display()
+            )))?;
 
-                process_record(
-                    &record, &header,
-                    &mut writers, vs_writer, &schema, &props, batch_size,
-                    &mut variant_count, &mut filtered_contigs, &mut multiallelic_split,
-                    output,
-                )?;
-            }
-        }};
-    }
+        for result in vcf_reader.records() {
+            let record = result
+                .map_err(|e| FavorError::Analysis(format!(
+                    "VCF parse error in {}: {e}", input_path.display()
+                )))?;
 
-    if is_bgzf {
-        let bgzf_reader = noodles_bgzf::Reader::new(file);
-        ingest_records!(BufReader::with_capacity(256 * 1024, bgzf_reader));
-    } else {
-        ingest_records!(BufReader::with_capacity(256 * 1024, file));
+            process_record(
+                &record, &header,
+                &mut writers, vs_writer, &schema, &props, batch_size,
+                &mut variant_count, &mut filtered_contigs, &mut multiallelic_split,
+                output,
+            )?;
+        }
     }
 
     // Flush and close all writers
@@ -399,6 +418,7 @@ fn get_or_create_writer<'a>(
             count: 0,
         });
     }
+    // Just inserted above if missing, so key is guaranteed present
     Ok(writers.get_mut(chrom).unwrap())
 }
 
@@ -460,7 +480,10 @@ fn process_record(
 
     for alt in &alts {
         let alt_upper = alt.trim().to_uppercase();
-        if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty() {
+        // Skip missing, spanning deletion, and symbolic alleles (<DEL>, <INS>, etc.)
+        if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty()
+            || alt_upper.starts_with('<')
+        {
             continue;
         }
 

@@ -12,7 +12,6 @@ clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 ratatui = "0.29"
 crossterm = "0.28"
-duckdb = { version = "1.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -20,6 +19,7 @@ anyhow = "1"
 ureq = "3"
 dirs = "6"
 sha2 = "0.10"
+memmap2 = "0.9"
 faer = "0.22"
 statrs = "0.18"
 rayon = "1.10"
@@ -28,17 +28,39 @@ walkdir = "2"
 # VCF → parquet: streaming parser + columnar writer
 noodles-vcf = "0.73"
 noodles-bgzf = "0.14"
-# noodles-core removed: unused (vcf + bgzf are sufficient)
-arrow = { version = "54", default-features = false, features = ["ipc"] }
-parquet = { version = "54", default-features = false, features = ["arrow", "zstd"] }
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+
+# DataFusion: execution engine (replacing DuckDB)
+datafusion = "53"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+async-trait = "0.1"
+futures = "0.3"
 
 [profile.dev]
-# DuckDB bundled is slow to link — split codegen for faster incremental
 split-debuginfo = "unpacked"
+incremental = true
+codegen-units = 256
 
+[profile.dev.build-override]
+opt-level = 0
+codegen-units = 256
+debug = false
+
+# Optimized iteration: fast rebuilds, still runs at near-release speed.
+[profile.release-fast]
+inherits = "release"
+incremental = true
+codegen-units = 256
+lto = "off"
+debug = false
+strip = "debuginfo"
+
+# Shipping build.
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
+strip = "symbols"
 
 [dev-dependencies]
 tempfile = "3.27.0"

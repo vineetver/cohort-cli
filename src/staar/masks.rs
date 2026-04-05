@@ -1,40 +1,10 @@
 use super::MaskType;
-use crate::types::AnnotatedVariant;
-
-pub const PLOF_CONSEQUENCES: &[&str] = &[
-    "stopgain",
-    "stoploss",
-    "frameshift insertion",
-    "frameshift deletion",
-    "frameshift substitution",
-    "splicing",
-    "frameshift_variant",
-    "stop_gained",
-    "stop_lost",
-    "splice_donor_variant",
-    "splice_acceptor_variant",
-    "start_lost",
-];
-
-const PTV_CONSEQUENCES: &[&str] = &[
-    "stopgain",
-    "stop_gained",
-    "frameshift insertion",
-    "frameshift deletion",
-    "frameshift substitution",
-    "frameshift_variant",
-];
-
-const SPLICE_CONSEQUENCES: &[&str] = &[
-    "splicing",
-    "splice_donor_variant",
-    "splice_acceptor_variant",
-];
+use crate::types::{AnnotatedVariant, Chromosome, Consequence};
 
 #[derive(Debug)]
 pub struct MaskGroup {
     pub name: String,
-    pub chromosome: String,
+    pub chromosome: Chromosome,
     pub start: u32,
     pub end: u32,
     pub variant_indices: Vec<usize>,
@@ -62,12 +32,11 @@ pub const NONCODING_MASKS: &[(MaskType, fn(&AnnotatedVariant) -> bool)] = &[
 ];
 
 fn is_plof(v: &AnnotatedVariant) -> bool {
-    PLOF_CONSEQUENCES.contains(&v.annotation.consequence.as_str())
-        || v.annotation.region_type == "splicing"
+    v.annotation.consequence.is_plof() || v.annotation.region_type.contains_splicing()
 }
 
 fn is_missense(v: &AnnotatedVariant) -> bool {
-    v.annotation.consequence == "missense_variant" || v.annotation.consequence == "nonsynonymous SNV"
+    v.annotation.consequence.is_missense()
 }
 
 fn is_disruptive_missense(v: &AnnotatedVariant) -> bool {
@@ -79,11 +48,11 @@ fn is_plof_or_missense(v: &AnnotatedVariant) -> bool {
 }
 
 fn is_synonymous(v: &AnnotatedVariant) -> bool {
-    v.annotation.consequence == "synonymous_variant" || v.annotation.consequence == "synonymous SNV"
+    v.annotation.consequence.is_synonymous()
 }
 
 fn is_ptv(v: &AnnotatedVariant) -> bool {
-    PTV_CONSEQUENCES.contains(&v.annotation.consequence.as_str())
+    v.annotation.consequence.is_ptv()
 }
 
 fn is_ptv_ds(v: &AnnotatedVariant) -> bool {
@@ -91,23 +60,23 @@ fn is_ptv_ds(v: &AnnotatedVariant) -> bool {
 }
 
 fn is_splice(v: &AnnotatedVariant) -> bool {
-    v.annotation.region_type == "splicing"
-        || SPLICE_CONSEQUENCES.contains(&v.annotation.consequence.as_str())
+    v.annotation.region_type.contains_splicing() || v.annotation.consequence.is_splice()
 }
 
 fn is_upstream(v: &AnnotatedVariant) -> bool {
-    v.annotation.region_type.contains("upstream") || v.annotation.consequence == "upstream_gene_variant"
+    v.annotation.region_type.contains_upstream()
+        || v.annotation.consequence == Consequence::UpstreamGeneVariant
 }
 
 fn is_downstream(v: &AnnotatedVariant) -> bool {
-    v.annotation.region_type.contains("downstream") || v.annotation.consequence == "downstream_gene_variant"
+    v.annotation.region_type.contains_downstream()
+        || v.annotation.consequence == Consequence::DownstreamGeneVariant
 }
 
 fn is_utr(v: &AnnotatedVariant) -> bool {
-    v.annotation.region_type.contains("UTR") || matches!(
-        v.annotation.consequence.as_str(),
-        "5_prime_UTR_variant" | "3_prime_UTR_variant"
-    )
+    v.annotation.region_type.contains_utr()
+        || matches!(v.annotation.consequence,
+            Consequence::FivePrimeUtrVariant | Consequence::ThreePrimeUtrVariant)
 }
 
 fn is_promoter_cage(v: &AnnotatedVariant) -> bool {
@@ -127,9 +96,9 @@ fn is_enhancer_dhs(v: &AnnotatedVariant) -> bool {
 }
 
 fn is_ncrna(v: &AnnotatedVariant) -> bool {
-    v.annotation.region_type.contains("ncRNA")
-        || v.annotation.consequence == "non_coding_transcript_exon_variant"
-        || v.annotation.consequence == "non_coding_transcript_variant"
+    v.annotation.region_type.contains_ncrna()
+        || matches!(v.annotation.consequence,
+            Consequence::NonCodingTranscriptExonVariant | Consequence::NonCodingTranscriptVariant)
 }
 
 pub fn build_masks_from_registry(
@@ -141,7 +110,7 @@ pub fn build_masks_from_registry(
         std::collections::HashMap::new();
     for (i, v) in variants.iter().enumerate() {
         if !v.gene_name.is_empty() {
-            gene_variants.entry(v.gene_name.clone()).or_default().push(i);
+            gene_variants.entry(v.gene_name.to_string()).or_default().push(i);
         }
     }
 
@@ -163,7 +132,7 @@ pub fn build_masks_from_registry(
                         matching.iter().map(|&i| variants[i].position).collect();
                     Some(MaskGroup {
                         name: gene.clone(),
-                        chromosome: variants[matching[0]].chromosome.to_string(),
+                        chromosome: variants[matching[0]].chromosome,
                         start: positions.iter().copied().min().unwrap_or(0),
                         end: positions.iter().copied().max().unwrap_or(0),
                         variant_indices: matching,
@@ -192,13 +161,14 @@ pub fn build_noncoding_masks(
 #[cfg(test)]
 fn v(region_type: &str, consequence: &str, cadd: f64, revel: f64,
      cage_prom: bool, cage_enh: bool, ccre_prom: bool, ccre_enh: bool) -> AnnotatedVariant {
-    use crate::types::{AnnotationWeights, FunctionalAnnotation, RegulatoryFlags, Chromosome};
+    use crate::types::{AnnotationWeights, FunctionalAnnotation, RegionType, RegulatoryFlags, Chromosome};
     AnnotatedVariant {
         chromosome: Chromosome::Autosome(22), position: 1000,
         ref_allele: "A".into(), alt_allele: "T".into(),
         maf: 0.001, gene_name: "BRCA2".into(),
         annotation: FunctionalAnnotation {
-            region_type: region_type.into(), consequence: consequence.into(),
+            region_type: RegionType::from_str_lossy(region_type),
+            consequence: Consequence::from_str_lossy(consequence),
             cadd_phred: cadd, revel,
             weights: AnnotationWeights([0.0; 11]),
             regulatory: RegulatoryFlags {
@@ -406,7 +376,7 @@ mod tests {
             AnnotatedVariant { position: i * 500, ..v("exonic", "stopgain", 10.0, 0.0, false, false, false, false) }
         }).collect();
         let indices: Vec<usize> = (0..5).collect();
-        let windows = build_sliding_windows(&variants, &indices, "22", 1000, 1000);
+        let windows = build_sliding_windows(&variants, &indices, Chromosome::Autosome(22), 1000, 1000);
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].variant_indices.len(), 2);
         assert_eq!(windows[1].variant_indices.len(), 2);
@@ -439,17 +409,17 @@ mod tests {
     // -- SCANG tests --
 
     fn var_at(pos: u32) -> AnnotatedVariant {
-        use crate::types::{AnnotationWeights, Chromosome, FunctionalAnnotation, RegulatoryFlags};
+        use crate::types::{AnnotationWeights, Chromosome, FunctionalAnnotation, RegionType, RegulatoryFlags};
         AnnotatedVariant {
             chromosome: Chromosome::Autosome(1),
             position: pos,
             ref_allele: "A".into(),
             alt_allele: "T".into(),
             maf: 0.005,
-            gene_name: String::new(),
+            gene_name: "".into(),
             annotation: FunctionalAnnotation {
-                region_type: String::new(),
-                consequence: String::new(),
+                region_type: RegionType::Unknown,
+                consequence: Consequence::Unknown,
                 cadd_phred: 10.0,
                 revel: 0.0,
                 weights: AnnotationWeights([0.5; 11]),
@@ -463,7 +433,7 @@ mod tests {
         let variants: Vec<AnnotatedVariant> = (0..100).map(|i| var_at(i * 100)).collect();
         let indices: Vec<usize> = (0..100).collect();
         let params = ScangParams { lmin: 10, lmax: 30, step: 10 };
-        let result = build_scang_windows(&variants, &indices, "1", &params);
+        let result = build_scang_windows(&variants, &indices, Chromosome::Autosome(1), &params);
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].0, 10);
@@ -480,7 +450,7 @@ mod tests {
         let variants: Vec<AnnotatedVariant> = (0..5).map(|i| var_at(i * 100)).collect();
         let indices: Vec<usize> = (0..5).collect();
         let params = ScangParams::default();
-        let result = build_scang_windows(&variants, &indices, "1", &params);
+        let result = build_scang_windows(&variants, &indices, Chromosome::Autosome(1), &params);
         assert!(result.is_empty());
     }
 }
@@ -509,7 +479,7 @@ impl Default for ScangParams {
 pub fn build_scang_windows(
     variants: &[AnnotatedVariant],
     chrom_indices: &[usize],
-    chromosome: &str,
+    chromosome: Chromosome,
     params: &ScangParams,
 ) -> Vec<(u32, Vec<MaskGroup>)> {
     let n = chrom_indices.len();
@@ -519,6 +489,7 @@ pub fn build_scang_windows(
 
     let lmax = params.lmax.min(n);
     let mut result = Vec::new();
+    let chrom_label = chromosome.label();
 
     let mut wsize = params.lmin;
     while wsize <= lmax {
@@ -531,8 +502,8 @@ pub fn build_scang_windows(
             let last_pos = variants[*window_indices.last().unwrap()].position;
 
             groups.push(MaskGroup {
-                name: format!("scang_L{}_{chromosome}:{first_pos}-{last_pos}", wsize),
-                chromosome: chromosome.to_string(),
+                name: format!("scang_L{}_{chrom_label}:{first_pos}-{last_pos}", wsize),
+                chromosome,
                 start: first_pos,
                 end: last_pos,
                 variant_indices: window_indices,
@@ -549,7 +520,7 @@ pub fn build_scang_windows(
 pub fn build_sliding_windows(
     variants: &[AnnotatedVariant],
     chrom_indices: &[usize],
-    chromosome: &str,
+    chromosome: Chromosome,
     window_size: u32,
     step_size: u32,
 ) -> Vec<MaskGroup> {
@@ -560,6 +531,7 @@ pub fn build_sliding_windows(
     let min_pos = chrom_indices.iter().map(|&i| variants[i].position).min().unwrap_or(0);
     let max_pos = chrom_indices.iter().map(|&i| variants[i].position).max().unwrap_or(0);
 
+    let chrom_label = chromosome.label();
     let mut windows = Vec::new();
     let mut start = min_pos;
 
@@ -573,8 +545,8 @@ pub fn build_sliding_windows(
 
         if indices.len() >= 2 {
             windows.push(MaskGroup {
-                name: format!("{}:{}-{}", chromosome, start, end),
-                chromosome: chromosome.to_string(),
+                name: format!("{chrom_label}:{start}-{end}"),
+                chromosome,
                 start,
                 end,
                 variant_indices: indices,

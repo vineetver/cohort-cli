@@ -8,23 +8,20 @@
 
 use std::path::Path;
 
-use super::{Analysis, BuildGuess, CoordBase};
-use crate::data::AnnotationDb;
+use super::{Analysis, BuildGuess, CoordBase, Delimiter};
 use crate::config::Config;
-use crate::db::DuckEngine;
+use crate::data::AnnotationDb;
+use crate::engine::DfEngine;
 use crate::error::FavorError;
 
-/// Chromosomes to try probing, in priority order.
-/// Falls back through the list until one has data in both input and annotations.
 const PROBE_CHROMS: &[&str] = &["1", "2", "22", "10", "X"];
 
 /// Run build and coordinate detection on an analysis.
 /// Mutates analysis.build_guess and analysis.coord_base in place.
-/// Requires DuckDB engine and configured annotation paths.
 pub fn detect_build_and_coords(
     analysis: &mut Analysis,
     input_path: &Path,
-    engine: &DuckEngine,
+    engine: &DfEngine,
     config: &Config,
 ) -> Result<(), FavorError> {
     let chr_col = match &analysis.chr_col {
@@ -41,39 +38,44 @@ pub fn detect_build_and_coords(
         Err(_) => return Ok(()),
     };
 
-    let read_csv_expr = match analysis.delimiter {
-        Some(delim) => format!(
-            "read_csv('{}', header=true, all_varchar=true, delim={})",
-            input_path.display(), delim.sql_literal()
-        ),
-        None => format!(
-            "read_parquet('{}')",
-            input_path.display()
-        ),
+    // Register the input file as a table
+    let delimiter = match analysis.delimiter {
+        Some(Delimiter::Tab) => b'\t',
+        Some(Delimiter::Comma) => b',',
+        Some(Delimiter::Space) => b' ',
+        None => {
+            // Parquet input — register as parquet
+            engine.register_parquet_file("_ingest_input", input_path)?;
+            return probe_all_chroms(engine, &chr_col, &pos_col, &ann_db, analysis);
+        }
     };
+    engine.register_csv("_ingest_input", input_path, delimiter)?;
+    probe_all_chroms(engine, &chr_col, &pos_col, &ann_db, analysis)
+}
 
-    // Try each chromosome until we get a sample with hits
+fn probe_all_chroms(
+    engine: &DfEngine,
+    chr_col: &str,
+    pos_col: &str,
+    ann_db: &AnnotationDb,
+    analysis: &mut Analysis,
+) -> Result<(), FavorError> {
     for probe_chrom in PROBE_CHROMS {
         let probe_parquet = match ann_db.chrom_parquet(probe_chrom) {
             Some(p) => p,
             None => continue,
         };
 
-        let result = probe_chromosome(
-            engine, &read_csv_expr, &chr_col, &pos_col,
-            probe_chrom, &probe_parquet.to_string_lossy(),
-        );
+        let result = probe_chromosome(engine, chr_col, pos_col, probe_chrom, &probe_parquet);
 
         match result {
             Ok(Some((rate_1based, rate_0based))) => {
-                // Coordinate base
                 if rate_1based > 0.5 {
                     analysis.coord_base = CoordBase::OneBased;
                 } else if rate_0based > 0.5 {
                     analysis.coord_base = CoordBase::ZeroBased;
                 }
 
-                // Build
                 let best_rate = rate_1based.max(rate_0based);
                 if best_rate > 0.5 {
                     analysis.build_guess = BuildGuess::Hg38;
@@ -85,72 +87,49 @@ pub fn detect_build_and_coords(
                 }
                 return Ok(());
             }
-            Ok(None) => continue, // no data for this chrom, try next
-            Err(_) => continue,   // query failed, try next
+            Ok(None) => continue,
+            Err(_) => continue,
         }
     }
-
-    Ok(()) // couldn't detect from any chromosome
+    Ok(())
 }
 
-/// Probe a single chromosome. Returns Some((rate_1based, rate_0based)) or None if no data.
 fn probe_chromosome(
-    engine: &DuckEngine,
-    read_csv_expr: &str,
+    engine: &DfEngine,
     chr_col: &str,
     pos_col: &str,
     chrom: &str,
-    annotation_path: &str,
+    annotation_path: &std::path::Path,
 ) -> Result<Option<(f64, f64)>, FavorError> {
+    // Register annotation parquet for this chromosome
+    let ann_table = format!("_ann_probe_{chrom}");
+    engine.register_parquet_file(&ann_table, annotation_path)?;
+
     // Sample 100 positions from input for this chromosome
-    let sample_sql = format!(
-        "CREATE OR REPLACE TEMP TABLE _ingest_probe AS
-         SELECT CAST(\"{pos_col}\" AS INTEGER) AS pos
-         FROM {read_csv_expr}
-         WHERE UPPER(REGEXP_REPLACE(CAST(\"{chr_col}\" AS VARCHAR), '^chr', '', 'i')) = '{chrom}'
+    engine.execute(&format!(
+        "CREATE OR REPLACE VIEW _ingest_probe AS \
+         SELECT CAST(\"{pos_col}\" AS INT) AS pos \
+         FROM _ingest_input \
+         WHERE upper(regexp_replace(CAST(\"{chr_col}\" AS VARCHAR), '^chr', '', 'i')) = '{chrom}' \
          LIMIT 100"
-    );
+    ))?;
 
-    engine.execute(&sample_sql)?;
-
-    // Check how many samples we got
-    let count = query_single_i64(engine, "SELECT COUNT(*) FROM _ingest_probe")?;
+    let count = engine.query_scalar("SELECT COUNT(*) FROM _ingest_probe")?;
     if count < 5 {
-        let _ = engine.execute("DROP TABLE IF EXISTS _ingest_probe");
-        return Ok(None); // not enough data
+        return Ok(None);
     }
 
-    // 1-based match
-    let hits_1 = query_single_i64(engine, &format!(
-        "SELECT COUNT(*) FROM _ingest_probe s
-         SEMI JOIN read_parquet('{annotation_path}') a ON s.pos = a.position"
+    // 1-based match: positions that exist in annotations
+    let hits_1 = engine.query_scalar(&format!(
+        "SELECT COUNT(*) FROM _ingest_probe s \
+         WHERE EXISTS (SELECT 1 FROM {ann_table} a WHERE a.position = s.pos)"
     ))?;
 
-    // 0-based match (pos + 1)
-    let hits_0 = query_single_i64(engine, &format!(
-        "SELECT COUNT(*) FROM _ingest_probe s
-         SEMI JOIN read_parquet('{annotation_path}') a ON s.pos + 1 = a.position"
+    // 0-based match: pos + 1
+    let hits_0 = engine.query_scalar(&format!(
+        "SELECT COUNT(*) FROM _ingest_probe s \
+         WHERE EXISTS (SELECT 1 FROM {ann_table} a WHERE a.position = s.pos + 1)"
     ))?;
 
-    let _ = engine.execute("DROP TABLE IF EXISTS _ingest_probe");
-
-    let rate_1 = hits_1 as f64 / count as f64;
-    let rate_0 = hits_0 as f64 / count as f64;
-
-    Ok(Some((rate_1, rate_0)))
-}
-
-fn query_single_i64(engine: &DuckEngine, sql: &str) -> Result<i64, FavorError> {
-    let conn = engine.connection();
-    let mut stmt = conn.prepare(sql)
-        .map_err(|e| FavorError::Analysis(format!("Probe query failed: {e}")))?;
-    let mut rows = stmt.query([])
-        .map_err(|e| FavorError::Analysis(format!("Probe query failed: {e}")))?;
-
-    if let Some(row) = rows.next()
-        .map_err(|e| FavorError::Analysis(format!("Probe read failed: {e}")))? {
-        row.get(0).map_err(|e| FavorError::Analysis(format!("Probe parse failed: {e}")))
-    } else {
-        Ok(0)
-    }
+    Ok(Some((hits_1 as f64 / count as f64, hits_0 as f64 / count as f64)))
 }

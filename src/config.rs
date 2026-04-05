@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::column::Col;
 use crate::error::FavorError;
 
 /// Annotation tier. Sum type — cannot be anything other than Base or Full.
@@ -22,6 +23,30 @@ pub enum Environment {
     Workstation,
 }
 
+/// Pipeline columns derivable from base-tier annotations.
+const BASE_TIER_COLS: &[Col] = &[
+    Col::Chromosome, Col::Position, Col::RefAllele, Col::AltAllele,
+    Col::Vid,
+    Col::GeneName, Col::RegionType, Col::Consequence,
+    Col::CaddPhred,
+    Col::IsCcrePromoter, Col::IsCcreEnhancer,
+];
+
+/// Pipeline columns derivable from full-tier annotations (superset of base).
+const FULL_TIER_COLS: &[Col] = &[
+    Col::Chromosome, Col::Position, Col::RefAllele, Col::AltAllele,
+    Col::Vid,
+    Col::GeneName, Col::RegionType, Col::Consequence,
+    Col::CaddPhred,
+    Col::IsCcrePromoter, Col::IsCcreEnhancer,
+    Col::Revel,
+    Col::IsCagePromoter, Col::IsCageEnhancer,
+    Col::WCadd, Col::WLinsight, Col::WFathmmXf,
+    Col::WApcEpiActive, Col::WApcEpiRepressed, Col::WApcEpiTranscription,
+    Col::WApcConservation, Col::WApcProteinFunction,
+    Col::WApcLocalNd, Col::WApcMutationDensity, Col::WApcTf,
+];
+
 impl Tier {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -35,6 +60,44 @@ impl Tier {
             Tier::Base => "~200 GB",
             Tier::Full => "~508 GB",
         }
+    }
+
+    /// Pipeline columns guaranteed present after annotating with this tier.
+    pub fn columns(self) -> &'static [Col] {
+        match self {
+            Tier::Base => BASE_TIER_COLS,
+            Tier::Full => FULL_TIER_COLS,
+        }
+    }
+
+    /// Does this tier provide a specific pipeline column?
+    pub fn has(self, col: Col) -> bool {
+        self.columns().contains(&col)
+    }
+
+    /// What tier is required to produce all of the given columns?
+    pub fn required_for(cols: &[Col]) -> Tier {
+        if cols.iter().all(|c| Tier::Base.has(*c)) {
+            Tier::Base
+        } else {
+            Tier::Full
+        }
+    }
+
+    /// Top-level struct columns present in this tier's annotation parquets.
+    pub fn source_columns(self) -> &'static [&'static str] {
+        match self {
+            Tier::Base => &["gencode", "main", "ccre"],
+            Tier::Full => &[
+                "gencode", "main", "ccre", "cage", "apc",
+                "dbnsfp", "linsight", "fathmm_xf",
+            ],
+        }
+    }
+
+    /// Does this tier's annotation parquet include a given source column?
+    pub fn has_source(self, col: &str) -> bool {
+        self.source_columns().contains(&col)
     }
 }
 
@@ -183,8 +246,14 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = std::fs::read_to_string(&path)?;
-        let config: Config = toml::from_str(&content)?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| FavorError::Resource(format!(
+                "Cannot read config '{}': {e}", path.display()
+            )))?;
+        let config: Config = toml::from_str(&content)
+            .map_err(|e| FavorError::Resource(format!(
+                "Invalid config '{}': {e}", path.display()
+            )))?;
         Ok(config)
     }
 
@@ -203,10 +272,16 @@ impl Config {
     pub fn save(&self) -> Result<(), FavorError> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| FavorError::Resource(format!(
+                    "Cannot create config directory '{}': {e}", parent.display()
+                )))?;
         }
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        std::fs::write(&path, &content)
+            .map_err(|e| FavorError::Resource(format!(
+                "Cannot write config '{}': {e}", path.display()
+            )))?;
         Ok(())
     }
 
