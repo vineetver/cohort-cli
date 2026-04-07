@@ -203,3 +203,134 @@ pub fn load_groups(
     ));
     Ok(partition)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::{create, OutputMode};
+    use std::io::Write;
+
+    fn null_output() -> Box<dyn Output> {
+        create(&OutputMode::Machine)
+    }
+
+    fn write_tsv(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let p = dir.path().join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn load_kinship_reorders_to_sample_order_and_symmetrizes() {
+        // File lists S2 before S1; loader must place S1 at index 0 and S2
+        // at index 1. Off-diagonal is given once and must be mirrored to
+        // both halves.
+        let dir = tempfile::tempdir().unwrap();
+        let body = "S2\tS2\t1.0\n\
+                    S1\tS1\t1.0\n\
+                    S1\tS2\t0.5\n";
+        let path = write_tsv(&dir, "kin.tsv", body);
+        let order = vec!["S1".to_string(), "S2".to_string()];
+        let out = null_output();
+        let kins =
+            load_kinship(&[path], &order, out.as_ref()).expect("load_kinship should succeed");
+        assert_eq!(kins.len(), 1);
+        let kin = &kins[0];
+        assert_eq!(kin.n(), 2);
+        let dense = kin.as_dense().expect("2x2 dense");
+        assert_eq!(dense[(0, 0)], 1.0);
+        assert_eq!(dense[(1, 1)], 1.0);
+        assert_eq!(dense[(0, 1)], 0.5);
+        assert_eq!(dense[(1, 0)], 0.5);
+        assert_eq!(kin.label(), "kin");
+    }
+
+    #[test]
+    fn load_kinship_skips_samples_outside_genotype_set() {
+        // S3 is not in the sample order — its rows are silently dropped
+        // (not an error: kinship files often cover a superset of the
+        // genotyped samples).
+        let dir = tempfile::tempdir().unwrap();
+        let body = "S1\tS1\t1.0\n\
+                    S2\tS2\t1.0\n\
+                    S1\tS2\t0.5\n\
+                    S1\tS3\t0.25\n\
+                    S3\tS3\t1.0\n";
+        let path = write_tsv(&dir, "kin.tsv", body);
+        let order = vec!["S1".to_string(), "S2".to_string()];
+        let out = null_output();
+        let kins = load_kinship(&[path], &order, out.as_ref()).unwrap();
+        let dense = kins[0].as_dense().unwrap();
+        // S3 entries dropped, S1↔S2 still set.
+        assert_eq!(dense[(0, 1)], 0.5);
+        assert_eq!(dense[(1, 0)], 0.5);
+    }
+
+    #[test]
+    fn load_kinship_rejects_unparseable_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "S1\tS1\t1.0\n\
+                    S1\tS2\tNOT_A_NUMBER\n";
+        let path = write_tsv(&dir, "kin.tsv", body);
+        let order = vec!["S1".to_string(), "S2".to_string()];
+        let out = null_output();
+        let err = load_kinship(&[path], &order, out.as_ref()).unwrap_err();
+        match err {
+            FavorError::Input(msg) => {
+                assert!(msg.contains("cannot parse value"), "msg = {msg}");
+            }
+            other => panic!("expected Input error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_kinship_skips_header_and_comments() {
+        // Header row (non-numeric value column) and `#` lines are ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let body = "id1\tid2\tkinship\n\
+                    # comment line\n\
+                    \n\
+                    S1\tS1\t1.0\n\
+                    S2\tS2\t1.0\n\
+                    S1\tS2\t0.25\n";
+        let path = write_tsv(&dir, "kin.tsv", body);
+        let order = vec!["S1".to_string(), "S2".to_string()];
+        let out = null_output();
+        let kins = load_kinship(&[path], &order, out.as_ref()).unwrap();
+        let dense = kins[0].as_dense().unwrap();
+        assert_eq!(dense[(0, 1)], 0.25);
+    }
+
+    #[test]
+    fn load_kinship_diagonal_defaults_to_one_when_unspecified() {
+        // Missing diagonal lines are fine — the loader pre-fills 1.0 on
+        // the diagonal so the resulting matrix is still SPD-shaped.
+        let dir = tempfile::tempdir().unwrap();
+        let body = "S1\tS2\t0.3\n";
+        let path = write_tsv(&dir, "kin.tsv", body);
+        let order = vec!["S1".to_string(), "S2".to_string()];
+        let out = null_output();
+        let kins = load_kinship(&[path], &order, out.as_ref()).unwrap();
+        let dense = kins[0].as_dense().unwrap();
+        assert_eq!(dense[(0, 0)], 1.0);
+        assert_eq!(dense[(1, 1)], 1.0);
+        assert_eq!(dense[(0, 1)], 0.3);
+        assert_eq!(dense[(1, 0)], 0.3);
+    }
+
+    #[test]
+    fn load_kinship_returns_one_matrix_per_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = write_tsv(&dir, "a.tsv", "S1\tS1\t1.0\nS2\tS2\t1.0\nS1\tS2\t0.4\n");
+        let p2 = write_tsv(&dir, "b.tsv", "S1\tS1\t1.0\nS2\tS2\t1.0\nS1\tS2\t0.1\n");
+        let order = vec!["S1".to_string(), "S2".to_string()];
+        let out = null_output();
+        let kins = load_kinship(&[p1, p2], &order, out.as_ref()).unwrap();
+        assert_eq!(kins.len(), 2);
+        assert_eq!(kins[0].label(), "a");
+        assert_eq!(kins[1].label(), "b");
+        assert_eq!(kins[0].as_dense().unwrap()[(0, 1)], 0.4);
+        assert_eq!(kins[1].as_dense().unwrap()[(0, 1)], 0.1);
+    }
+}

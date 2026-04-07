@@ -135,7 +135,9 @@ pub fn fit_reml(
     }
 
     // Path selection. Sparse only when dense won't fit. Otherwise dense —
-    // it's exact and slightly faster on small studies.
+    // it's exact and slightly faster on small studies. Sparse path uses
+    // Takahashi (exact, 1:1 with upstream R) by default; Hutchinson
+    // remains available as a fallback for tests.
     let take_sparse = !dense_fits && all_sparse;
     if take_sparse {
         return sparse::fit_reml_sparse(
@@ -145,7 +147,8 @@ pub fn fit_reml(
             groups,
             weights,
             init_tau,
-            sparse::DEFAULT_HUTCHINSON_PROBES,
+            sparse::SparseSolverKind::default(),
+            None,
         );
     }
 
@@ -288,6 +291,41 @@ mod tests {
         assert!(total > 0.0 && total.is_finite());
         assert!(state.tau.kinship(0) >= 0.0);
         assert!(state.tau.group(0) >= 0.0);
+    }
+
+    #[test]
+    fn fit_reml_rejects_group_partition_size_mismatch() {
+        // GroupPartition covers more samples than y has rows.
+        let n = 10;
+        let y = Mat::<f64>::zeros(n, 1);
+        let x = make_x_intercept(n);
+        let groups = GroupPartition::single(n + 5);
+        match fit_reml(&y, &x, &[], &groups, None) {
+            Err(FavorError::Input(msg)) => {
+                assert!(msg.contains("group partition covers"), "msg = {msg}");
+            }
+            Err(other) => panic!("expected Input, got {other:?}"),
+            Ok(_) => panic!("expected Input error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn fit_reml_rejects_kinship_size_mismatch() {
+        let n = 10;
+        let y = Mat::<f64>::zeros(n, 1);
+        let x = make_x_intercept(n);
+        let groups = GroupPartition::single(n);
+        // Build a kinship over n+5 samples — must be rejected.
+        let kin = block_family_kinship(3, 5, "wrong-size");
+        assert_ne!(kin.n(), n);
+        match fit_reml(&y, &x, std::slice::from_ref(&kin), &groups, None) {
+            Err(FavorError::Input(msg)) => {
+                assert!(msg.contains("n_samples"), "msg = {msg}");
+                assert!(msg.contains("wrong-size"), "msg = {msg}");
+            }
+            Err(other) => panic!("expected Input, got {other:?}"),
+            Ok(_) => panic!("expected Input error, got Ok"),
+        }
     }
 
     #[test]
