@@ -113,3 +113,94 @@ pub fn fit_pql_glmm(
 
     last_state.ok_or_else(|| FavorError::Analysis("PQL outer loop did not run".into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::{create, OutputMode};
+
+    fn null_output() -> Box<dyn Output> {
+        create(&OutputMode::Machine)
+    }
+
+    fn block_family_kinship(n_fam: usize, family_size: usize) -> KinshipMatrix {
+        let n = n_fam * family_size;
+        let mut k = Mat::<f64>::zeros(n, n);
+        for f in 0..n_fam {
+            let base = f * family_size;
+            for i in 0..family_size {
+                for j in 0..family_size {
+                    k[(base + i, base + j)] = if i == j { 1.0 } else { 0.5 };
+                }
+            }
+        }
+        KinshipMatrix::new(k, "fam".into()).unwrap()
+    }
+
+    /// Deterministic 0/1 outcome from a logistic of an underlying signal.
+    /// Same recipe as the smoke test in `mod.rs::tests` so the kernel
+    /// is exercised on a stable fixture.
+    fn synthetic_binary(n: usize) -> (Mat<f64>, Mat<f64>) {
+        let mut y = Mat::<f64>::zeros(n, 1);
+        let mut x = Mat::<f64>::zeros(n, 2);
+        for i in 0..n {
+            x[(i, 0)] = 1.0;
+            let xi = (i as f64 / n as f64) * 2.0 - 1.0;
+            x[(i, 1)] = xi;
+            let p = 1.0 / (1.0 + (-(0.5 * xi)).exp());
+            let u = 0.5 + 0.5 * ((i as f64 * 1.234567).sin() * 0.999);
+            y[(i, 0)] = if u < p { 1.0 } else { 0.0 };
+        }
+        (y, x)
+    }
+
+    #[test]
+    fn fit_pql_glmm_returns_finite_state_with_kinship() {
+        let kin = block_family_kinship(20, 10);
+        let n = kin.n();
+        let groups = GroupPartition::single(n);
+        let (y, x) = synthetic_binary(n);
+
+        let out = null_output();
+        let state = fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref())
+            .expect("fit_pql_glmm");
+
+        assert_eq!(state.tau.n_kinship(), 1);
+        assert_eq!(state.tau.n_group(), 1);
+        assert!(state.tau.kinship(0).is_finite() && state.tau.kinship(0) >= 0.0);
+        assert!(state.tau.group(0).is_finite() && state.tau.group(0) >= 0.0);
+        assert_eq!(state.p_y.nrows(), n);
+    }
+
+    #[test]
+    fn fit_pql_glmm_propagates_kinship_size_mismatch() {
+        // PQL delegates input validation to `fit_reml`. A wrong-size
+        // kinship must surface as `FavorError::Input` from the very
+        // first inner call.
+        let kin = block_family_kinship(3, 5);
+        let n = 50;
+        assert_ne!(kin.n(), n);
+        let groups = GroupPartition::single(n);
+        let (y, x) = synthetic_binary(n);
+        let out = null_output();
+        match fit_pql_glmm(&y, &x, std::slice::from_ref(&kin), &groups, out.as_ref()) {
+            Err(FavorError::Input(msg)) => assert!(msg.contains("n_samples"), "msg = {msg}"),
+            Err(other) => panic!("expected Input, got {other:?}"),
+            Ok(_) => panic!("expected Input error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn fit_pql_glmm_groups_only_runs_without_kinship() {
+        // PQL with groups only — no kinships at all. Exercises the
+        // dispatcher's groups-only branch through the PQL wrapper.
+        let n = 80;
+        let (y, x) = synthetic_binary(n);
+        let groups = GroupPartition::single(n);
+        let out = null_output();
+        let state = fit_pql_glmm(&y, &x, &[], &groups, out.as_ref()).expect("fit_pql_glmm");
+        assert_eq!(state.tau.n_kinship(), 0);
+        assert_eq!(state.tau.n_group(), 1);
+        assert!(state.tau.group(0).is_finite() && state.tau.group(0) >= 0.0);
+    }
+}

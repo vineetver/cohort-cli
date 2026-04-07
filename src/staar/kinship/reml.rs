@@ -48,6 +48,7 @@ use faer::Mat;
 use crate::error::FavorError;
 use crate::staar::kinship::dense;
 use crate::staar::kinship::sparse;
+use crate::staar::kinship::sparse::takahashi::TakahashiNumeric;
 use crate::staar::kinship::sparse::SparseFactor;
 use crate::staar::kinship::types::{
     GroupPartition, KinshipInverse, KinshipMatrix, KinshipState, VarianceComponents,
@@ -171,36 +172,62 @@ pub fn matvec_kinship(k: &KinshipMatrix, v: &Mat<f64>) -> Mat<f64> {
 /// score / AI matrix need. Built fresh each AI iteration by the
 /// [`SolverBuilder`].
 ///
-/// The variants exist because dense and sparse use fundamentally different
-/// representations of "Σ⁻¹": dense materializes the n × n inverse; sparse
-/// keeps the Cholesky factor and applies it via triangular solves.
+/// Three variants:
+///
+/// * `Dense` — owns a materialized n × n inverse. tr and diag are exact.
+///   Cost: O(n²) memory.
+/// * `SparseHutchinson` — owns a high-level sparse Cholesky factor of Σ.
+///   Σ⁻¹ · v is a triangular solve; tr(Σ⁻¹ K_l) and diag(Σ⁻¹) are
+///   stochastic Hutchinson estimates. Kept as a fallback (and for the
+///   parity test that confirms the stochastic path still produces
+///   valid-within-tolerance estimates).
+/// * `SparseTakahashi` — owns the simplicial Cholesky factor plus the
+///   selected inverse Z = Σ⁻¹ at the union sparsity pattern, computed by
+///   the Takahashi recursion. tr and diag are *exact* — 1:1 with
+///   upstream `R/glmmkin.R::R_fitglmm_ai`'s `sum(Sigma_i * kins[[i]])`
+///   formula, while using strictly less memory than upstream (we never
+///   materialize the dense inverse). Default sparse path. Closes #26 #27.
 pub enum SigmaSolver {
     Dense(Mat<f64>),
-    Sparse(SparseSolverState),
+    SparseHutchinson(SparseHutchinsonState),
+    SparseTakahashi(SparseTakahashiState),
 }
 
-/// State the sparse solver carries between method calls. The factor
+/// Per-iteration state for the Hutchinson-based sparse path. The factor
 /// applies Σ⁻¹ via triangular solves; the probe count and `n` feed the
 /// stochastic trace estimators.
-pub struct SparseSolverState {
+pub struct SparseHutchinsonState {
     pub factor: faer::sparse::linalg::solvers::Llt<u32, f64>,
     pub n: usize,
     pub n_probes: usize,
 }
 
+/// Per-iteration state for the Takahashi-based sparse path. Owns the
+/// simplicial Cholesky factor (for solves via `SimplicialLltRef`) and
+/// the selected inverse `Z` at the L sparsity pattern (for exact trace
+/// and diagonal reads).
+pub struct SparseTakahashiState {
+    pub numeric: TakahashiNumeric,
+}
+
 impl SigmaSolver {
     /// Σ⁻¹ · v_col where `v_col` is `n × 1`. Returns a fresh column vector.
     /// Dense path uses the manual matvec loop (bit-identical to the
-    /// original `dense.rs::matvec`); sparse path uses the cached Cholesky
-    /// factor.
+    /// original `dense.rs::matvec`); sparse paths use a sparse triangular
+    /// solve via the cached Cholesky factor.
     pub fn solve_into(&self, v: &Mat<f64>) -> Mat<f64> {
         debug_assert_eq!(v.ncols(), 1);
         match self {
             Self::Dense(sigma_inv) => matvec(sigma_inv, v),
-            Self::Sparse(state) => {
+            Self::SparseHutchinson(state) => {
                 use faer::linalg::solvers::Solve;
                 let mut out = v.clone();
                 state.factor.solve_in_place(&mut out);
+                out
+            }
+            Self::SparseTakahashi(state) => {
+                let mut out = v.clone();
+                state.numeric.solve_in_place(out.as_mut());
                 out
             }
         }
@@ -208,46 +235,61 @@ impl SigmaSolver {
 
     /// Σ⁻¹ · M for an `n × k` matrix M. Returns a fresh matrix. Dense uses
     /// faer's matrix-matrix product (matches `dense.rs`'s `&sigma_inv * x`);
-    /// sparse clones M and runs the Cholesky solve in place.
+    /// sparse paths clone M and run the Cholesky solve in place.
     pub fn solve_columns(&self, m: &Mat<f64>) -> Mat<f64> {
         match self {
             Self::Dense(sigma_inv) => sigma_inv * m,
-            Self::Sparse(state) => {
+            Self::SparseHutchinson(state) => {
                 use faer::linalg::solvers::Solve;
                 let mut out = m.clone();
                 state.factor.solve_in_place(&mut out);
                 out
             }
+            Self::SparseTakahashi(state) => {
+                let mut out = m.clone();
+                state.numeric.solve_in_place(out.as_mut());
+                out
+            }
         }
     }
 
-    /// Full `diag(Σ⁻¹)` as a length-n vector. Exact in the dense path
-    /// (just reads the diagonal of the materialized inverse); stochastic
-    /// in the sparse path (Hutchinson Rademacher estimator). Replaced by
-    /// the Takahashi recursion in #26 #27 once that lands.
+    /// Full `diag(Σ⁻¹)` as a length-n vector.
+    ///
+    /// * Dense — exact, reads the diagonal of the materialized inverse.
+    /// * SparseHutchinson — stochastic Rademacher estimator.
+    /// * SparseTakahashi — exact, reads the diagonal of the selected
+    ///   inverse computed by the Takahashi recursion. Bit-identical
+    ///   replacement for upstream's `diag(Sigma_i)`.
     pub fn diag_sigma_inv(&self) -> Vec<f64> {
         match self {
             Self::Dense(sigma_inv) => {
                 let n = sigma_inv.nrows();
                 (0..n).map(|i| sigma_inv[(i, i)]).collect()
             }
-            Self::Sparse(state) => sparse::hutchinson::diag_inverse_estimate(
+            Self::SparseHutchinson(state) => sparse::hutchinson::diag_inverse_estimate(
                 &state.factor,
                 state.n,
                 state.n_probes,
                 sparse::hutchinson::HUTCHINSON_SEED,
             ),
+            Self::SparseTakahashi(state) => state.numeric.selected.diag(),
         }
     }
 
     /// `tr(P K_l) = tr(Σ⁻¹ K_l) − tr(Σ⁻¹ X cov X' Σ⁻¹ K_l)`.
     ///
     /// Each backend computes this its own way to keep the floating-point
-    /// summation order bit-identical to the original `dense.rs` and
-    /// `sparse.rs` paths. Dense uses the formula
-    /// `tr(Σ⁻¹ K_l) − frob(Σ⁻¹X, K_l Σ⁻¹X cov)`; sparse uses
-    /// `hutchinson_trace − Σ_{a,b} cov[a,b] · (B' K_l B)[b,a]`. Both are
-    /// algebraically equal but reorder the sums slightly.
+    /// summation order bit-identical to the corresponding original code
+    /// path:
+    ///
+    /// * Dense — `tr(Σ⁻¹ K_l) − frob(Σ⁻¹X, K_l Σ⁻¹X cov)`, both terms
+    ///   exact via the materialized inverse.
+    /// * SparseHutchinson — `hutchinson_trace − Σ_{a,b} cov[a,b]·(B'K_l B)[b,a]`,
+    ///   first term stochastic, second term exact.
+    /// * SparseTakahashi — `Z.trace_with(K_l) − Σ_{a,b} cov[a,b]·(B'K_l B)[b,a]`,
+    ///   both terms exact. The first term reads the selected inverse Z
+    ///   directly at K_l's pattern, which matches upstream R's
+    ///   `sum(Sigma_i * kins[[i]])` Frobenius product.
     pub fn trace_p_k(
         &self,
         kinship: &KinshipMatrix,
@@ -259,17 +301,30 @@ impl SigmaSolver {
             Self::Dense(sigma_inv) => {
                 dense::trace_p_k_dense(sigma_inv, kinship, sigma_inv_x, cov)
             }
-            Self::Sparse(state) => {
-                sparse::trace_p_k_sparse(state, kinship, l, sigma_inv_x, cov)
+            Self::SparseHutchinson(state) => {
+                sparse::trace_p_k_sparse_hutchinson(state, kinship, l, sigma_inv_x, cov)
+            }
+            Self::SparseTakahashi(state) => {
+                sparse::trace_p_k_sparse_takahashi(state, kinship, sigma_inv_x, cov)
             }
         }
     }
 
     /// Hand back the inverse representation for embedding in `KinshipState`.
+    /// For the Takahashi variant the caller is expected to use
+    /// [`SolverBuilder::finalize_inverse`] instead, which can refactor via
+    /// the high-level Llt path needed by the score test.
     pub fn into_inverse(self) -> KinshipInverse {
         match self {
             Self::Dense(sigma_inv) => KinshipInverse::Dense(sigma_inv),
-            Self::Sparse(state) => KinshipInverse::Sparse(SparseFactor { llt: state.factor }),
+            Self::SparseHutchinson(state) => {
+                KinshipInverse::Sparse(SparseFactor { llt: state.factor })
+            }
+            Self::SparseTakahashi(_) => panic!(
+                "SigmaSolver::SparseTakahashi must go through SolverBuilder::finalize_inverse, \
+                 not into_inverse — the score path needs a high-level Llt that the simplicial \
+                 representation doesn't carry"
+            ),
         }
     }
 }
@@ -278,10 +333,28 @@ impl SigmaSolver {
 
 /// Builds a fresh [`SigmaSolver`] from the current variance components.
 /// Implemented once per backend (`DenseBuilder` in `dense.rs`,
-/// `SparseBuilder` in `sparse/mod.rs`). The shared convergence loop calls
-/// `build(&tau)` once per AI iteration.
+/// `HutchinsonBuilder` and `TakahashiBuilder` in `sparse/mod.rs`). The
+/// shared convergence loop calls `build(&tau)` once per AI iteration.
+///
+/// `finalize_inverse` is the hook that converts the final per-iteration
+/// solver into the [`KinshipInverse`] representation that gets carried in
+/// `KinshipState` and consumed by the score test. The default
+/// implementation just calls `solver.into_inverse()`. The Takahashi
+/// builder overrides it because the simplicial Cholesky factor inside the
+/// Takahashi solver isn't a high-level `Llt`, and the score path needs
+/// the high-level form — so the override refactors Σ once at the final τ
+/// to produce a fresh `Llt` for the score path.
 pub trait SolverBuilder {
     fn build(&self, tau: &VarianceComponents) -> Result<SigmaSolver, FavorError>;
+
+    fn finalize_inverse(
+        &self,
+        solver: SigmaSolver,
+        tau: &VarianceComponents,
+    ) -> Result<KinshipInverse, FavorError> {
+        let _ = tau;
+        Ok(solver.into_inverse())
+    }
 }
 
 // ─── ai_step: backend-agnostic single AI-REML iteration ─────────────────────
@@ -632,9 +705,11 @@ fn converge<B: SolverBuilder>(
         vec![0.0; l]
     };
 
+    let inverse = builder.finalize_inverse(last.solver, &tau)?;
+
     Ok(KinshipState {
         tau,
-        inverse: last.solver.into_inverse(),
+        inverse,
         sigma_inv_x: last.sigma_inv_x,
         cov: last.cov,
         p_y: last.p_y,

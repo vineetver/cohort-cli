@@ -38,17 +38,37 @@ struct PatternEntry {
 /// Built once per [`fit_reml_sparse`](super::fit_reml_sparse) call. Both
 /// the union pattern and the symbolic Cholesky factor are reused across
 /// every AI iteration and every boundary refit.
+///
+/// Holds two views of the same union pattern:
+///
+/// * **full** (`col_ptr`, `row_idx`, `contributions`) — symmetric storage
+///   used by the high-level `Llt` (Hutchinson) path with `Side::Lower`.
+/// * **upper** (`col_ptr_upper`, `row_idx_upper`, `upper_to_full`) — the
+///   upper triangle only, used by the simplicial Cholesky API
+///   (Takahashi). Faer's simplicial path requires upper-only input
+///   despite the docstring claim that "only the upper triangular part is
+///   analyzed" — the implementation actually walks every row in each
+///   column.
 pub struct Assembler {
     n: usize,
-    /// CSC column pointer for the union pattern, length `n + 1`.
+    /// CSC column pointer for the union pattern (full symmetric storage).
     pub(super) col_ptr: Vec<u32>,
-    /// CSC row indices for the union pattern, length `nnz`.
+    /// CSC row indices for the union pattern (full symmetric storage).
     pub(super) row_idx: Vec<u32>,
-    /// Per-nonzero contribution table, length `nnz`.
+    /// Per-nonzero contribution table for the full pattern.
     contributions: Vec<PatternEntry>,
-    /// Symbolic Cholesky factor of the union pattern. Cloning it bumps
-    /// faer's internal `Arc`.
+    /// Symbolic Cholesky factor for the high-level Llt path.
     symbolic: SymbolicLlt<u32>,
+
+    /// CSC column pointer for the upper-triangle-only view.
+    col_ptr_upper: Vec<u32>,
+    /// CSC row indices for the upper-triangle-only view.
+    row_idx_upper: Vec<u32>,
+    /// `upper_to_full[k]` is the position in the full `row_idx` /
+    /// `contributions` arrays that corresponds to the k-th entry of the
+    /// upper view. Lets `assemble_values_upper` reuse the per-entry
+    /// contribution table without recomputing.
+    upper_to_full: Vec<u32>,
 }
 
 impl Assembler {
@@ -160,12 +180,42 @@ impl Assembler {
                 ))
             })?;
 
+        // Upper-triangle-only view of the union pattern. faer's
+        // simplicial Cholesky low-level API
+        // (`factorize_simplicial_numeric_llt`) reads every row in each
+        // column with no upper/lower filter, despite the docstring
+        // saying "only the upper triangular part is analyzed". The
+        // high-level `Llt::factorize_numeric_llt` works around this by
+        // calling `adjoint()` to flip lower→upper before passing to the
+        // simplicial path (faer 0.22.6 cholesky.rs:3682). The Takahashi
+        // backend uses the simplicial API directly, so it needs us to
+        // hand it a strictly upper-triangular Σ.
+        let mut col_ptr_upper: Vec<u32> = Vec::with_capacity(n + 1);
+        let mut row_idx_upper: Vec<u32> = Vec::new();
+        let mut upper_to_full: Vec<u32> = Vec::new();
+        col_ptr_upper.push(0);
+        for j in 0..n {
+            let s = col_ptr[j] as usize;
+            let e = col_ptr[j + 1] as usize;
+            for k in s..e {
+                let r = row_idx[k];
+                if (r as usize) <= j {
+                    row_idx_upper.push(r);
+                    upper_to_full.push(k as u32);
+                }
+            }
+            col_ptr_upper.push(row_idx_upper.len() as u32);
+        }
+
         Ok(Self {
             n,
             col_ptr,
             row_idx,
             contributions,
             symbolic,
+            col_ptr_upper,
+            row_idx_upper,
+            upper_to_full,
         })
     }
 
@@ -225,5 +275,48 @@ impl Assembler {
 
     pub fn n(&self) -> usize {
         self.n
+    }
+
+    /// Build an owned upper-triangle-only `SymbolicSparseColMat<u32>`.
+    /// Required by the simplicial Cholesky path; see the comment in
+    /// [`Self::new`] for why.
+    pub fn pattern_owned_upper(&self) -> SymbolicSparseColMat<u32> {
+        SymbolicSparseColMat::<u32>::new_checked(
+            self.n,
+            self.n,
+            self.col_ptr_upper.clone(),
+            None,
+            self.row_idx_upper.clone(),
+        )
+    }
+
+    /// Compute the value vector for the upper-triangle-only view of Σ at
+    /// the current τ. Length matches `row_idx_upper`. Reuses the cached
+    /// per-entry `contributions` table via the `upper_to_full` mapping
+    /// so the assembly cost is identical to [`Self::assemble_values`]
+    /// modulo the constant factor of half the entries.
+    pub fn assemble_values_upper(
+        &self,
+        tau: &VarianceComponents,
+        groups: &GroupPartition,
+        weights: &[f64],
+        row_to_group: &[usize],
+    ) -> Vec<f64> {
+        let mut values = vec![0.0_f64; self.row_idx_upper.len()];
+        for (k_upper, &full_pos) in self.upper_to_full.iter().enumerate() {
+            let contrib = &self.contributions[full_pos as usize];
+            let mut s = 0.0;
+            for &(l, v) in &contrib.kinship_vals {
+                s += tau.kinship(l as usize) * v;
+            }
+            if let Some(i) = contrib.diagonal_sample {
+                let i = i as usize;
+                let g = row_to_group[i];
+                s += tau.group(g) / weights[i];
+            }
+            values[k_upper] = s;
+        }
+        let _ = groups;
+        values
     }
 }
