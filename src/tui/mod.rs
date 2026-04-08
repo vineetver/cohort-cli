@@ -2,7 +2,6 @@ pub mod action;
 pub mod app;
 pub mod event;
 pub mod output;
-pub mod screen;
 pub mod screens;
 pub mod shell;
 pub mod stages;
@@ -21,10 +20,10 @@ use crate::output::{Output, OutputMode};
 
 use self::app::{make_terminal, App};
 use self::output::{LogLine, TuiOutput};
-use self::screens::stage_view::StageView;
-use self::screens::workspace::WorkspaceScreen;
+use self::screens::stage_view::StageViewState;
 use self::stages::types::{SessionCtx, SetupConfig};
 use self::stages::SETUP_STAGE;
+use self::state::app::{AppState, View};
 use self::term::TermGuard;
 
 pub fn run(cwd: PathBuf, _out: &dyn Output, _mode: &OutputMode) -> Result<(), CohortError> {
@@ -36,8 +35,8 @@ pub fn run(cwd: PathBuf, _out: &dyn Output, _mode: &OutputMode) -> Result<(), Co
     if std::env::var("COHORT_TUI_SMOKE").is_ok_and(|v| !v.is_empty()) {
         smoke::spawn_demo(tui_out.clone());
     }
-    let initial = Box::new(WorkspaceScreen::new(cwd));
-    App::new(initial, log_rx, bars, tui_out).run(&mut terminal)
+    let state = AppState::new(cwd);
+    App::new(state, log_rx, bars, tui_out).run(&mut terminal)
 }
 
 pub fn run_setup_only(
@@ -59,8 +58,10 @@ pub fn run_setup_only(
         tier,
         focused: Some(cwd.as_path()),
     };
-    let screen = StageView::new(&SETUP_STAGE, ctx);
-    App::new(Box::new(screen), log_rx, bars, tui_out)
+    let stage_view = StageViewState::new(&SETUP_STAGE, ctx);
+    let mut state = AppState::new(cwd);
+    state.view = View::Stage(stage_view);
+    App::new(state, log_rx, bars, tui_out)
         .with_setup_sink(Arc::clone(&sink))
         .run(&mut terminal)?;
     let outcome = sink.lock().unwrap().take();

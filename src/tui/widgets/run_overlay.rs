@@ -56,10 +56,6 @@ impl RunOverlay {
         }
     }
 
-    pub fn is_finished(&self) -> bool {
-        self.finished
-    }
-
     pub fn push_log(&mut self, line: LogLine) {
         if matches!(line.level, LogLevel::Status | LogLevel::Success) {
             self.stage = line.message.clone();

@@ -17,10 +17,10 @@ use crate::output::Output;
 use super::action::{Action, KeyMap};
 use super::event::AppEvent;
 use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
-use super::screen::{Screen, Transition};
-use super::screens::help::HelpScreen;
+use super::screens::{help, stage_view, variant, workspace};
 use super::stages::types::{RunRequest, SetupConfig};
-use super::state::{SessionId, SessionState, SessionStore};
+use super::state::app::{AppState, Modal, Outcome, View};
+use super::state::{SessionId, SessionState};
 use super::widgets::palette::{Palette, PaletteOutcome};
 use super::widgets::run_overlay::{dim_area, RunOverlay};
 use crate::staar::pipeline::StaarPipeline;
@@ -30,7 +30,7 @@ struct BarEntry {
 }
 
 pub struct App {
-    screens: Vec<Box<dyn Screen>>,
+    state: AppState,
     log_rx: Receiver<LogLine>,
     shared_bars: BarRegistry,
     bars: Vec<BarEntry>,
@@ -38,29 +38,30 @@ pub struct App {
     cmd_tx: Sender<Result<(), CohortError>>,
     cmd_rx: Receiver<Result<(), CohortError>>,
     global_keys: KeyMap,
-    palette: Option<Palette>,
-    overlay: Option<RunOverlay>,
-    session_store: Option<SessionStore>,
-    setup_sink: Option<Arc<Mutex<Option<SetupConfig>>>>,
 }
 
 impl App {
     pub fn new(
-        mut initial: Box<dyn Screen>,
+        mut state: AppState,
         log_rx: Receiver<LogLine>,
         shared_bars: BarRegistry,
         tui_out: Arc<TuiOutput>,
     ) -> Self {
-        let session_store = SessionStore::from_home();
-        let mut probe = SessionState::default();
-        initial.contribute_session(&mut probe);
-        if let Some(store) = session_store.as_ref() {
+        let probe = SessionState {
+            cwd: state.workspace.cwd.clone(),
+            ..Default::default()
+        };
+        if let Some(store) = state.session_store.as_ref() {
             if !probe.cwd.as_os_str().is_empty() {
                 let id = SessionId::for_cwd(&probe.cwd);
                 match store.load(&id) {
-                    Ok(Some(state)) => initial.restore_session(&state),
+                    Ok(Some(saved)) => state.restore_session(&saved),
                     Ok(None) => {}
-                    Err(e) => initial.set_session_error(format!("session load failed: {e}")),
+                    Err(e) => {
+                        state.error = Some(super::shell::ErrorMessage {
+                            text: format!("session load failed: {e}"),
+                        });
+                    }
                 }
             }
         }
@@ -71,7 +72,7 @@ impl App {
             .bind(KeyCode::Char('p'), KeyModifiers::CONTROL, Action::OpenPalette)
             .bind(KeyCode::Char('?'), none, Action::OpenHelp);
         Self {
-            screens: vec![initial],
+            state,
             log_rx,
             shared_bars,
             bars: Vec::new(),
@@ -79,61 +80,37 @@ impl App {
             cmd_tx,
             cmd_rx,
             global_keys,
-            palette: None,
-            overlay: None,
-            session_store,
-            setup_sink: None,
         }
     }
 
     pub fn with_setup_sink(mut self, sink: Arc<Mutex<Option<SetupConfig>>>) -> Self {
-        self.setup_sink = Some(sink);
+        self.state.setup_sink = Some(sink);
         self
     }
 
-    fn save_session(&self) {
-        let Some(store) = self.session_store.as_ref() else {
-            return;
-        };
-        let mut state = SessionState::default();
-        for screen in &self.screens {
-            screen.contribute_session(&mut state);
-        }
-        if state.cwd.as_os_str().is_empty() {
-            return;
-        }
-        let id = SessionId::for_cwd(&state.cwd);
-        let _ = store.save(&id, &state);
-    }
-
-    pub fn run(mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), CohortError> {
+    pub fn run(
+        mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<(), CohortError> {
         let tick = Duration::from_millis(50);
         let mut last_title = String::new();
-        while let Some(top_idx) = self.screens.len().checked_sub(1) {
-            let current_title = self.screens[top_idx].title().to_string();
+        loop {
+            let current_title = title_for(&self.state).to_string();
             if current_title != last_title {
                 let _ = io::stdout().execute(SetTitle(format!("cohort — {current_title}")));
                 last_title = current_title;
             }
-            {
-                let palette_ref = self.palette.as_ref();
-                let overlay_ref = self.overlay.as_ref();
-                let screen = &mut self.screens[top_idx];
-                terminal
-                    .draw(|f| {
-                        let area = f.area();
-                        screen.draw(f, area);
-                        if let Some(o) = overlay_ref {
-                            let buf = f.buffer_mut();
-                            dim_area(area, buf);
-                            o.render(area, buf);
-                        }
-                        if let Some(p) = palette_ref {
-                            p.draw(f, area);
-                        }
-                    })
-                    .map_err(|e| CohortError::Internal(e.into()))?;
-            }
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    render(&mut self.state, f, area);
+                    if let Some(Modal::Run(_)) = &self.state.modal {
+                        let buf = f.buffer_mut();
+                        dim_area(area, buf);
+                    }
+                    render_modal(&mut self.state, f, area);
+                })
+                .map_err(|e| CohortError::Internal(e.into()))?;
 
             let mut pending: Vec<AppEvent> = Vec::new();
             if event::poll(tick).map_err(|e| CohortError::Internal(e.into()))? {
@@ -142,30 +119,41 @@ impl App {
                         if k.code == KeyCode::Char('c')
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                         {
-                            self.save_session();
+                            self.state.save_session();
                             return Ok(());
                         }
-                        if let Some(overlay) = self.overlay.as_mut() {
-                            if overlay.handle(k).is_some() {
-                                debug_assert!(overlay.is_finished());
-                                self.overlay = None;
+                        if let Some(Modal::Run(_)) = &mut self.state.modal {
+                            let close = if let Some(Modal::Run(o)) = &mut self.state.modal {
+                                o.handle(k).is_some()
+                            } else {
+                                false
+                            };
+                            if close {
+                                self.state.modal = None;
                             }
                             continue;
                         }
-                        if let Some(palette) = self.palette.as_mut() {
-                            match palette.handle_key(k) {
+                        if let Some(Modal::Palette(p)) = &mut self.state.modal {
+                            match p.handle_key(k) {
                                 PaletteOutcome::Stay => {}
                                 PaletteOutcome::Close => {
-                                    self.palette = None;
+                                    self.state.modal = None;
                                 }
                                 PaletteOutcome::Run(action) => {
-                                    self.palette = None;
-                                    let transition =
-                                        self.dispatch_palette_action(top_idx, action);
-                                    if self.apply_transition(top_idx, transition) {
-                                        continue;
+                                    self.state.modal = None;
+                                    let outcome = self.dispatch_palette_action(action);
+                                    if self.apply_outcome(outcome) {
+                                        return Ok(());
                                     }
                                 }
+                            }
+                            continue;
+                        }
+                        if let Some(Modal::Help(h)) = &mut self.state.modal {
+                            match k.code {
+                                KeyCode::Esc => self.state.modal = None,
+                                KeyCode::Tab => h.cycle(),
+                                _ => {}
                             }
                             continue;
                         }
@@ -177,91 +165,106 @@ impl App {
             }
             pending.extend(self.sample_bars());
 
-            let mut break_loop = false;
+            let mut outcomes: Vec<Outcome> = Vec::new();
             for ev in pending {
                 self.apply_to_log(&ev);
-                let transition = self.dispatch_event(top_idx, ev);
-                if self.apply_transition(top_idx, transition) {
-                    break_loop = true;
-                    break;
+                outcomes.push(self.dispatch_event(ev));
+            }
+            for outcome in outcomes {
+                if self.apply_outcome(outcome) {
+                    return Ok(());
                 }
             }
-            if break_loop {
-                continue;
+        }
+    }
+
+    fn dispatch_event(&mut self, ev: AppEvent) -> Outcome {
+        match ev {
+            AppEvent::Tick => {
+                if matches!(self.state.view, View::Workspace) {
+                    workspace::on_tick(&mut self.state);
+                }
+                Outcome::Stay
             }
+            AppEvent::Key(k) => {
+                let scope = self.state.active_scope();
+                let scope_keys = KeyMap::for_scope(scope);
+                if let Some(action) = scope_keys.lookup(k.code, k.modifiers) {
+                    return self.dispatch_action(action);
+                }
+                if let Some(global) = self.global_keys.lookup(k.code, k.modifiers) {
+                    return self.handle_global_action(global);
+                }
+                if matches!(self.state.view, View::Variant(_)) {
+                    let in_modal = match &self.state.view {
+                        View::Variant(v) => !matches!(v.modal, variant::VariantModal::None),
+                        _ => false,
+                    };
+                    if in_modal {
+                        return variant::handle_modal_key(&mut self.state, k);
+                    }
+                }
+                Outcome::Stay
+            }
+            _ => Outcome::Stay,
         }
-        Ok(())
     }
 
-    fn dispatch_event(&mut self, top_idx: usize, ev: AppEvent) -> Transition {
-        let AppEvent::Key(k) = &ev else {
-            return self.screens[top_idx].handle(&ev);
-        };
-        let screen_bound = self.screens[top_idx]
-            .keys()
-            .lookup(k.code, k.modifiers)
-            .is_some();
-        if screen_bound {
-            return self.screens[top_idx].handle(&ev);
+    fn dispatch_action(&mut self, action: Action) -> Outcome {
+        match &self.state.view {
+            View::Workspace => workspace::handle_action(&mut self.state, action),
+            View::Stage(_) => stage_view::handle_action(&mut self.state, action),
+            View::Variant(_) => variant::handle_action(&mut self.state, action),
         }
-        if let Some(global_action) = self.global_keys.lookup(k.code, k.modifiers) {
-            return self.handle_global_action(top_idx, global_action);
-        }
-        self.screens[top_idx].handle(&ev)
     }
 
-    fn handle_global_action(&mut self, top_idx: usize, action: Action) -> Transition {
+    fn handle_global_action(&mut self, action: Action) -> Outcome {
         match action {
             Action::OpenPalette => {
-                let scope = self.screens[top_idx].scope();
-                self.palette = Some(Palette::open(scope));
-                Transition::Stay
+                let scope = self.state.active_scope();
+                self.state.modal = Some(Modal::Palette(Palette::open(scope)));
+                Outcome::Stay
             }
             Action::OpenHelp => {
-                let scope = self.screens[top_idx].scope();
-                Transition::Push(Box::new(HelpScreen::new(scope)))
+                let scope = self.state.active_scope();
+                self.state.modal = Some(Modal::Help(help::HelpState::new(scope)));
+                Outcome::Stay
             }
-            Action::Quit => Transition::Quit,
-            _ => Transition::Stay,
+            Action::Quit => Outcome::Quit,
+            _ => Outcome::Stay,
         }
     }
 
-    fn dispatch_palette_action(&mut self, top_idx: usize, action: Action) -> Transition {
+    fn dispatch_palette_action(&mut self, action: Action) -> Outcome {
         match action {
-            Action::Quit => Transition::Quit,
+            Action::Quit => Outcome::Quit,
             Action::OpenHelp => {
-                let scope = self.screens[top_idx].scope();
-                Transition::Push(Box::new(HelpScreen::new(scope)))
+                let scope = self.state.active_scope();
+                self.state.modal = Some(Modal::Help(help::HelpState::new(scope)));
+                Outcome::Stay
             }
-            Action::OpenPalette
-            | Action::ClosePalette
-            | Action::ClosePaletteAndRun => Transition::Stay,
-            other => self.screens[top_idx].on_action(other),
+            Action::OpenPalette | Action::ClosePalette | Action::ClosePaletteAndRun => {
+                Outcome::Stay
+            }
+            other => self.dispatch_action(other),
         }
     }
 
-    fn apply_transition(&mut self, _top_idx: usize, transition: Transition) -> bool {
-        match transition {
-            Transition::Stay => false,
-            Transition::Quit => {
-                self.save_session();
-                self.screens.clear();
+    fn apply_outcome(&mut self, outcome: Outcome) -> bool {
+        match outcome {
+            Outcome::Stay => false,
+            Outcome::Quit => {
+                self.state.save_session();
                 true
             }
-            Transition::Pop => {
-                self.screens.pop();
-                if let Some(top) = self.screens.last_mut() {
-                    top.on_focus();
+            Outcome::Run(req) => {
+                if let RunRequest::Setup(cfg) = &req {
+                    if let Some(sink) = self.state.setup_sink.as_ref() {
+                        *sink.lock().unwrap() = Some(cfg.clone());
+                    }
                 }
-                true
-            }
-            Transition::Push(s) => {
-                self.screens.push(s);
-                true
-            }
-            Transition::Run(req) => {
                 let cancel = self.tui_out.arm_cancel();
-                self.overlay = Some(RunOverlay::launch(&req, cancel));
+                self.state.modal = Some(Modal::Run(RunOverlay::launch(&req, cancel)));
                 self.spawn_command(req);
                 false
             }
@@ -269,11 +272,6 @@ impl App {
     }
 
     fn spawn_command(&self, req: RunRequest) {
-        if let RunRequest::Setup(cfg) = &req {
-            if let Some(sink) = self.setup_sink.as_ref() {
-                *sink.lock().unwrap() = Some(cfg.clone());
-            }
-        }
         let out = Arc::clone(&self.tui_out);
         let tx = self.cmd_tx.clone();
         std::thread::spawn(move || {
@@ -285,17 +283,17 @@ impl App {
     fn apply_to_log(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::Log(line) => {
-                if let Some(o) = self.overlay.as_mut() {
+                if let Some(Modal::Run(o)) = &mut self.state.modal {
                     o.push_log(line.clone());
                 }
             }
             AppEvent::ProgressUpdate(snap) => {
-                if let Some(o) = self.overlay.as_mut() {
+                if let Some(Modal::Run(o)) = &mut self.state.modal {
                     o.push_progress(snap.clone());
                 }
             }
             AppEvent::CommandDone(res) => {
-                if let Some(o) = self.overlay.as_mut() {
+                if let Some(Modal::Run(o)) = &mut self.state.modal {
                     let mirror = match res {
                         Ok(()) => Ok(()),
                         Err(e) => Err(e.to_string()),
@@ -335,6 +333,33 @@ impl App {
         }
         self.bars.retain(|entry| !entry.arc.is_finished());
         events
+    }
+}
+
+fn render(state: &mut AppState, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    match &state.view {
+        View::Workspace => workspace::render(state, frame, area),
+        View::Stage(_) => stage_view::render(state, frame, area),
+        View::Variant(_) => variant::render(state, frame, area),
+    }
+}
+
+fn render_modal(state: &mut AppState, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    let Some(modal) = &state.modal else {
+        return;
+    };
+    match modal {
+        Modal::Help(h) => help::render(frame, area, h),
+        Modal::Palette(p) => p.draw(frame, area),
+        Modal::Run(o) => o.render(area, frame.buffer_mut()),
+    }
+}
+
+fn title_for(state: &AppState) -> &str {
+    match &state.view {
+        View::Workspace => "Workspace",
+        View::Stage(s) => s.title.as_str(),
+        View::Variant(v) => v.title.as_str(),
     }
 }
 

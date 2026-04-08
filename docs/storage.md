@@ -12,6 +12,7 @@ COHORT stores genotypes as a sparse matrix over `(sample_id, variant_vcf) -> dos
 
 - [Core Model](#core-model)
 - [The variant_vcf Invariant](#the-variant_vcf-invariant)
+- [Query Patterns](#query-patterns)
 - [Storage Layout](#storage-layout)
 - [Sparse Carrier Lists](#sparse-carrier-lists)
 - [Score Cache](#score-cache)
