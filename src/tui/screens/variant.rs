@@ -7,10 +7,13 @@ use arrow::datatypes::SchemaRef;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use parquet::arrow::ProjectionMask;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+};
 use ratatui::Frame;
 
 use crate::column::Col;
@@ -20,10 +23,10 @@ use crate::staar::sparse_g::SparseG;
 use crate::tui::action::{Action, ActionScope, KeyMap};
 use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
+use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::state::arrow_predicate::CompiledFilter;
 use crate::tui::state::parquet_scroller::{ParquetScroller, RowFilterFactory};
 use crate::tui::theme;
-use crate::tui::widgets::status_bar::StatusBar;
 
 pub struct VariantSpec {
     pub parquet: PathBuf,
@@ -439,13 +442,13 @@ impl VariantScreen {
         }
     }
 
-    fn draw_table(&self, frame: &mut Frame, area: Rect) {
+    fn draw_table(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", self.header_text()))
             .border_style(Style::default().fg(theme::MUTED));
         let inner = block.inner(area);
-        frame.render_widget(block, area);
+        block.render(area, buf);
 
         let Some((batch, focus)) = self.scroller.focused_record() else {
             let msg = if self.scroller.row_group_count() == 0 {
@@ -453,13 +456,11 @@ impl VariantScreen {
             } else {
                 "  no rows in this row group (filter excluded all)"
             };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    msg,
-                    Style::default().fg(theme::MUTED),
-                ))),
-                inner,
-            );
+            Paragraph::new(Line::from(Span::styled(
+                msg,
+                Style::default().fg(theme::MUTED),
+            )))
+            .render(inner, buf);
             return;
         };
 
@@ -514,7 +515,7 @@ impl VariantScreen {
             );
             lines.push(Line::from(spans));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 
     fn header_text(&self) -> String {
@@ -533,7 +534,7 @@ impl VariantScreen {
         }
     }
 
-    fn draw_detail(&self, frame: &mut Frame, area: Rect) {
+    fn draw_detail(&self, area: Rect, buf: &mut Buffer) {
         let inner = area;
         let Some((batch, row)) = self.scroller.focused_record() else {
             return;
@@ -581,10 +582,10 @@ impl VariantScreen {
                 Style::default().fg(theme::MUTED),
             )));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 
-    fn draw_filter_bar(&self, frame: &mut Frame, area: Rect, modal: &FilterModal) {
+    fn draw_filter_bar(&self, area: Rect, buf: &mut Buffer, modal: &FilterModal) {
         let input = Line::from(vec![
             Span::styled(" filter ", Style::default().fg(theme::WARN).bold()),
             Span::styled("/ ", Style::default().fg(theme::MUTED)),
@@ -595,10 +596,10 @@ impl VariantScreen {
             " e.g. af < 0.01 AND consequence contains missense  (enter apply, esc cancel)",
             theme::hint_bar_style(),
         ));
-        frame.render_widget(Paragraph::new(vec![input, hint]), area);
+        Paragraph::new(vec![input, hint]).render(area, buf);
     }
 
-    fn draw_carrier_panel(&self, frame: &mut Frame, area: Rect, panel: &CarrierModal) {
+    fn draw_carrier_panel(&self, area: Rect, buf: &mut Buffer, panel: &CarrierModal) {
         let list = &panel.carriers;
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             format!("  {} carriers of {}", list.len(), panel.vid),
@@ -635,12 +636,12 @@ impl VariantScreen {
                 Style::default().fg(theme::MUTED),
             )));
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        Paragraph::new(lines).render(area, buf);
     }
 
-    fn draw_column_picker(&self, frame: &mut Frame, area: Rect, picker: &ColumnsModal) {
+    fn draw_column_picker(&self, area: Rect, buf: &mut Buffer, picker: &ColumnsModal) {
         let overlay = centered(area, 50, 70);
-        frame.render_widget(Clear, overlay);
+        Clear.render(overlay, buf);
         let inner = overlay;
         let schema = self.scroller.schema();
         let items: Vec<ListItem> = schema
@@ -662,7 +663,7 @@ impl VariantScreen {
             .collect();
         let mut state = ListState::default();
         state.select(Some(picker.cursor));
-        frame.render_stateful_widget(List::new(items), inner, &mut state);
+        StatefulWidget::render(List::new(items), inner, buf, &mut state);
     }
 }
 
@@ -672,62 +673,48 @@ impl Screen for VariantScreen {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        let modal_height: u16 = match &self.modal {
-            VariantModal::Filter(_) => 2,
-            VariantModal::Carrier(_) => 10,
-            _ => 0,
+        let error_text = self.error.clone().or_else(|| match &self.modal {
+            VariantModal::Filter(m) => m.parse_error.clone().map(|e| format!("error: {e}")),
+            _ => None,
+        });
+        let error = error_text.map(|text| ErrorMessage { text });
+        let chrome = ScreenChrome {
+            title: &self.title,
+            status: None,
+            error: error.as_ref(),
+            scope: ActionScope::Variant,
+            graph: None,
         };
-        let detail_height: u16 = if area.height >= 24 { 8 } else { 0 };
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(6),
-                Constraint::Length(detail_height),
-                Constraint::Length(modal_height),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-        self.draw_table(frame, v[0]);
-        if detail_height > 0 && matches!(self.modal, VariantModal::None) {
-            self.draw_detail(frame, v[1]);
-        }
-        match &self.modal {
-            VariantModal::Filter(m) => self.draw_filter_bar(frame, v[2], m),
-            VariantModal::Carrier(p) => self.draw_carrier_panel(frame, v[2], p),
-            _ => {}
-        }
-
-        let error_line = self
-            .error
-            .clone()
-            .or_else(|| match &self.modal {
-                VariantModal::Filter(m) => m.parse_error.clone().map(|e| format!("error: {e}")),
-                _ => None,
-            })
-            .unwrap_or_default();
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {error_line}"),
-                Style::default().fg(theme::BAD),
-            ))),
-            v[3],
-        );
-
-        let hint = match &self.modal {
-            VariantModal::None => {
-                "/ filter  ! columns  c carriers  { } page  g G start/end  q back"
+        let modal = &self.modal;
+        let body = |inner: Rect, buf: &mut Buffer| {
+            let modal_height: u16 = match modal {
+                VariantModal::Filter(_) => 2,
+                VariantModal::Carrier(_) => 10,
+                _ => 0,
+            };
+            let detail_height: u16 = if inner.height >= 20 { 8 } else { 0 };
+            let v = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(6),
+                    Constraint::Length(detail_height),
+                    Constraint::Length(modal_height),
+                ])
+                .split(inner);
+            self.draw_table(v[0], buf);
+            if detail_height > 0 && matches!(modal, VariantModal::None) {
+                self.draw_detail(v[1], buf);
             }
-            VariantModal::Filter(_) => "enter apply  esc cancel  ctrl-u clear",
-            VariantModal::Columns(_) => "space toggle  enter close  esc cancel",
-            VariantModal::Carrier(_) => "j k scroll  esc close",
+            match modal {
+                VariantModal::Filter(m) => self.draw_filter_bar(v[2], buf, m),
+                VariantModal::Carrier(p) => self.draw_carrier_panel(v[2], buf, p),
+                _ => {}
+            }
+            if let VariantModal::Columns(p) = modal {
+                self.draw_column_picker(inner, buf, p);
+            }
         };
-        StatusBar { title: &self.title, keys: hint }.render(frame, v[4]);
-
-        if let VariantModal::Columns(p) = &self.modal {
-            self.draw_column_picker(frame, area, p);
-        }
+        Shell::new(chrome, body).render(area, frame.buffer_mut());
     }
 
     fn scope(&self) -> ActionScope {
