@@ -542,6 +542,7 @@ impl Screen for TransformScreen {
         let v = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(2),
                 Constraint::Min(4),
                 Constraint::Length(1),
                 Constraint::Length(3),
@@ -550,6 +551,13 @@ impl Screen for TransformScreen {
                 Constraint::Length(1),
             ])
             .split(area);
+
+        let title = Paragraph::new(Line::from(Span::styled(
+            format!("  {}", self.title),
+            Style::default().fg(theme::ACCENT).bold(),
+        )));
+        frame.render_widget(title, v[0]);
+        let v = &v[1..];
 
         let run_focused = self.focus == self.run_field_idx();
         let visible = self.visible_fields();
