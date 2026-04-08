@@ -10,11 +10,12 @@ use ratatui::Frame;
 use crate::config::Config;
 use crate::tui::action::{Action, ActionScope, KeyMap};
 use crate::tui::screen::{Screen, Transition};
+use crate::tui::screens::results::ResultsScreen;
 use crate::tui::screens::setup::SetupScreen;
 use crate::tui::screens::transform::TransformScreen;
 use crate::tui::screens::variant::VariantScreen;
 use crate::tui::state::artifacts::ArtifactKind;
-use crate::tui::state::workspace::WorkspaceState;
+use crate::tui::state::workspace::{derived_from_label, WorkspaceState};
 use crate::tui::theme;
 use crate::tui::widgets::log_tail::LogTail;
 use crate::tui::widgets::status_bar::StatusBar;
@@ -92,9 +93,17 @@ impl Screen for WorkspaceScreen {
         &self.title
     }
 
+    fn error_slot(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
     fn on_focus(&mut self) {
         self.state.rescan();
         self.sync_focus();
+    }
+
+    fn focused_path(&self) -> Option<PathBuf> {
+        self.state.focused().map(|a| a.path.clone())
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, log: &LogTail) {
@@ -120,8 +129,17 @@ impl Screen for WorkspaceScreen {
             .state
             .artifacts
             .iter()
-            .map(|a| {
-                let line = Line::from(vec![
+            .enumerate()
+            .map(|(i, a)| {
+                let selected = self.state.selection.contains(&i);
+                let mark = if selected { "[x] " } else { "[ ] " };
+                let mark_style = Style::default().fg(if selected {
+                    theme::ACCENT
+                } else {
+                    theme::MUTED
+                });
+                let mut spans = vec![
+                    Span::styled(mark, mark_style),
                     Span::styled(
                         format!(" {} ", a.kind.glyph()),
                         Style::default().fg(theme::WARN),
@@ -130,22 +148,49 @@ impl Screen for WorkspaceScreen {
                         format!("{:<28}", a.display_name),
                         Style::default().fg(theme::FG),
                     ),
-                    Span::styled(
-                        a.path.to_string_lossy().into_owned(),
+                ];
+                if let Some(d) = &a.derived_from {
+                    spans.push(Span::styled(
+                        derived_from_label(d),
                         Style::default().fg(theme::MUTED),
-                    ),
-                ]);
-                ListItem::new(line)
+                    ));
+                    if self.state.artifact_is_stale(i) {
+                        spans.push(Span::styled(" (stale)", Style::default().fg(theme::BAD)));
+                    }
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(
+                    a.path.to_string_lossy().into_owned(),
+                    Style::default().fg(theme::MUTED),
+                ));
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
+        let visual_tag = if self.state.visual_anchor.is_some() {
+            " [VISUAL]"
+        } else {
+            ""
+        };
+        let selected_tag = if self.state.selection.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} selected", self.state.selection.len())
+        };
         let list_title = if self.state.scanning {
             format!(
-                " Artifacts ({}, scanning…) ",
-                self.state.artifacts.len()
+                " Artifacts ({}, scanning…){}{} ",
+                self.state.artifacts.len(),
+                selected_tag,
+                visual_tag,
             )
         } else {
-            format!(" Artifacts ({}) ", self.state.artifacts.len())
+            format!(
+                " Artifacts ({}){}{} ",
+                self.state.artifacts.len(),
+                selected_tag,
+                visual_tag,
+            )
         };
         let list = List::new(items)
             .block(
@@ -222,13 +267,9 @@ impl Screen for WorkspaceScreen {
 
         log.draw(frame, v[1], "Log");
 
-        let status_keys = match &self.notice {
-            Some(msg) => msg.as_str(),
-            None => "q quit  j/k move  enter transform  r rescan  s setup  ? help",
-        };
         StatusBar {
             title: &self.title,
-            keys: status_keys,
+            keys: "q quit  j/k move  enter transform  p parent  space select  v visual  a group  s staar  S setup  r rescan  ? help",
         }
         .render(frame, v[2]);
     }
@@ -248,7 +289,12 @@ impl Screen for WorkspaceScreen {
             .bind(KeyCode::Char('k'), none, Action::WorkspaceUp)
             .bind(KeyCode::Char('r'), none, Action::WorkspaceRescan)
             .bind(KeyCode::Enter, none, Action::WorkspaceOpenFocused)
-            .bind(KeyCode::Char('s'), none, Action::WorkspaceOpenSetup)
+            .bind(KeyCode::Char('p'), none, Action::WorkspaceOpenParent)
+            .bind(KeyCode::Char(' '), none, Action::WorkspaceToggleSelect)
+            .bind(KeyCode::Char('v'), none, Action::WorkspaceToggleVisualMode)
+            .bind(KeyCode::Char('a'), none, Action::WorkspaceSelectAllInGroup)
+            .bind(KeyCode::Char('s'), none, Action::OpenStaarForm)
+            .bind(KeyCode::Char('S'), KeyModifiers::SHIFT, Action::WorkspaceOpenSetup)
     }
 
     fn on_action(&mut self, action: Action) -> Transition {
@@ -270,7 +316,39 @@ impl Screen for WorkspaceScreen {
                 self.notice = None;
                 Transition::Stay
             }
+            Action::WorkspaceToggleSelect => {
+                self.state.toggle_selection();
+                Transition::Stay
+            }
+            Action::WorkspaceToggleVisualMode => {
+                self.state.toggle_visual_mode();
+                Transition::Stay
+            }
+            Action::WorkspaceSelectAllInGroup => {
+                self.state.select_all_in_group();
+                Transition::Stay
+            }
+            Action::WorkspaceOpenParent => {
+                if let Some(art) = self.state.focused() {
+                    if let Some(idx) = self.state.first_parent_index(art) {
+                        self.state.set_focus(idx);
+                        self.sync_focus();
+                    }
+                }
+                Transition::Stay
+            }
             Action::WorkspaceOpenSetup => Transition::Push(Box::new(SetupScreen::new())),
+            Action::OpenStaarForm => match self.state.focused() {
+                Some(a) if matches!(a.kind, ArtifactKind::AnnotatedSet { .. }) => {
+                    self.notice = None;
+                    Transition::Push(Box::new(TransformScreen::new_staar(Some(a.path.clone()))))
+                }
+                Some(_) => {
+                    self.notice = None;
+                    Transition::Push(Box::new(TransformScreen::new_staar(None)))
+                }
+                None => Transition::Stay,
+            },
             Action::WorkspaceOpenFocused => match self.state.focused() {
                 Some(a) => match &a.kind {
                     ArtifactKind::RawVcf => {
@@ -295,6 +373,18 @@ impl Screen for WorkspaceScreen {
                     }
                     ArtifactKind::ParquetFile => {
                         match VariantScreen::new_for_parquet(a.path.clone()) {
+                            Ok(screen) => {
+                                self.notice = None;
+                                Transition::Push(Box::new(screen))
+                            }
+                            Err(e) => {
+                                self.notice = Some(format!("cannot open: {e}"));
+                                Transition::Stay
+                            }
+                        }
+                    }
+                    ArtifactKind::StaarResults => {
+                        match ResultsScreen::new(a.path.clone()) {
                             Ok(screen) => {
                                 self.notice = None;
                                 Transition::Push(Box::new(screen))

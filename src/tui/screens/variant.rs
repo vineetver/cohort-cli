@@ -112,6 +112,12 @@ impl VariantScreen {
         Ok(s)
     }
 
+    pub fn with_initial_filter(mut self, expression: String) -> Self {
+        self.filter_bar.buf = expression;
+        self.apply_filter_text();
+        self
+    }
+
     fn rebuild_projection(&mut self) -> Result<(), CohortError> {
         let n_fields = self.scroller.schema().fields().len();
         let mut wanted: Vec<bool> = vec![false; n_fields];
@@ -633,6 +639,10 @@ impl Screen for VariantScreen {
         &self.title
     }
 
+    fn error_slot(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
         let bottom_height: u16 = match self.sub_mode {
             SubMode::FilterEdit => 4,
@@ -657,11 +667,11 @@ impl Screen for VariantScreen {
             _ => {}
         }
 
-        let status = self
-            .error
-            .clone()
-            .unwrap_or_else(|| "/ filter  ! columns  c carriers  { } page  g G start/end  q back".into());
-        StatusBar { title: &self.title, keys: &status }.render(frame, v[3]);
+        StatusBar {
+            title: &self.title,
+            keys: "/ filter  ! columns  c carriers  { } page  g G start/end  q back",
+        }
+        .render(frame, v[3]);
 
         if self.sub_mode == SubMode::ColumnPicker {
             self.draw_column_picker(frame, area);

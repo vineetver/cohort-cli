@@ -11,6 +11,7 @@ pub enum ActionScope {
     Help,
     Palette,
     Variant,
+    Results,
 }
 
 impl ActionScope {
@@ -25,6 +26,7 @@ impl ActionScope {
             Self::Help => "Help",
             Self::Palette => "Palette",
             Self::Variant => "Variant browser",
+            Self::Results => "STAAR results",
         }
     }
 
@@ -39,6 +41,7 @@ impl ActionScope {
             ActionScope::Help,
             ActionScope::Palette,
             ActionScope::Variant,
+            ActionScope::Results,
         ]
     }
 }
@@ -56,6 +59,11 @@ pub enum Action {
     WorkspaceRescan,
     WorkspaceOpenSetup,
     WorkspaceOpenFocused,
+    WorkspaceOpenParent,
+    WorkspaceToggleSelect,
+    WorkspaceToggleVisualMode,
+    WorkspaceSelectAllInGroup,
+    OpenStaarForm,
 
     TransformNextField,
     TransformPrevField,
@@ -100,6 +108,13 @@ pub enum Action {
     VariantOpenCarrierView,
     VariantCloseCarrierView,
     VariantClose,
+
+    ResultsScrollUp,
+    ResultsScrollDown,
+    ResultsCycleSort,
+    ResultsCycleMask,
+    ResultsOpenVariants,
+    ResultsClose,
 }
 
 pub type KeyBinding = (KeyCode, KeyModifiers);
@@ -115,6 +130,11 @@ const ACTIONS_ALL: &[Action] = &[
     Action::WorkspaceRescan,
     Action::WorkspaceOpenSetup,
     Action::WorkspaceOpenFocused,
+    Action::WorkspaceOpenParent,
+    Action::WorkspaceToggleSelect,
+    Action::WorkspaceToggleVisualMode,
+    Action::WorkspaceSelectAllInGroup,
+    Action::OpenStaarForm,
     Action::SetupPrev,
     Action::SetupNext,
     Action::SetupConfirm,
@@ -153,6 +173,12 @@ const ACTIONS_ALL: &[Action] = &[
     Action::VariantOpenCarrierView,
     Action::VariantCloseCarrierView,
     Action::VariantClose,
+    Action::ResultsScrollUp,
+    Action::ResultsScrollDown,
+    Action::ResultsCycleSort,
+    Action::ResultsCycleMask,
+    Action::ResultsOpenVariants,
+    Action::ResultsClose,
 ];
 
 impl Action {
@@ -168,7 +194,12 @@ impl Action {
             | Self::WorkspaceDown
             | Self::WorkspaceRescan
             | Self::WorkspaceOpenSetup
-            | Self::WorkspaceOpenFocused => ActionScope::Workspace,
+            | Self::WorkspaceOpenFocused
+            | Self::WorkspaceOpenParent
+            | Self::WorkspaceToggleSelect
+            | Self::WorkspaceToggleVisualMode
+            | Self::WorkspaceSelectAllInGroup
+            | Self::OpenStaarForm => ActionScope::Workspace,
 
             Self::SetupCancel
             | Self::SetupConfirm
@@ -212,6 +243,13 @@ impl Action {
             | Self::VariantOpenCarrierView
             | Self::VariantCloseCarrierView
             | Self::VariantClose => ActionScope::Variant,
+
+            Self::ResultsScrollUp
+            | Self::ResultsScrollDown
+            | Self::ResultsCycleSort
+            | Self::ResultsCycleMask
+            | Self::ResultsOpenVariants
+            | Self::ResultsClose => ActionScope::Results,
         }
     }
 
@@ -228,6 +266,11 @@ impl Action {
             Self::WorkspaceRescan => "Rescan workspace",
             Self::WorkspaceOpenSetup => "Open setup",
             Self::WorkspaceOpenFocused => "Open focused artifact",
+            Self::WorkspaceOpenParent => "Open parent artifact",
+            Self::WorkspaceToggleSelect => "Toggle selection",
+            Self::WorkspaceToggleVisualMode => "Toggle visual mode",
+            Self::WorkspaceSelectAllInGroup => "Select all in group",
+            Self::OpenStaarForm => "STAAR on focused",
 
             Self::TransformNextField => "Next field",
             Self::TransformPrevField => "Previous field",
@@ -272,6 +315,13 @@ impl Action {
             Self::VariantOpenCarrierView => "Show carriers",
             Self::VariantCloseCarrierView => "Close carrier panel",
             Self::VariantClose => "Close browser",
+
+            Self::ResultsScrollUp => "Move row up",
+            Self::ResultsScrollDown => "Move row down",
+            Self::ResultsCycleSort => "Cycle sort key",
+            Self::ResultsCycleMask => "Next mask file",
+            Self::ResultsOpenVariants => "Open variants for gene",
+            Self::ResultsClose => "Close results",
         }
     }
 
@@ -288,6 +338,11 @@ impl Action {
             Self::WorkspaceRescan => "rescan roots for artifacts",
             Self::WorkspaceOpenSetup => "configure tier, root, packs, environment",
             Self::WorkspaceOpenFocused => "open a transform for the focused artifact",
+            Self::WorkspaceOpenParent => "jump focus to the first parent of the focused artifact",
+            Self::WorkspaceToggleSelect => "toggle the focused artifact in the multi-selection",
+            Self::WorkspaceToggleVisualMode => "enter or leave visual range-select mode",
+            Self::WorkspaceSelectAllInGroup => "select every artifact of the focused kind",
+            Self::OpenStaarForm => "open the STAAR form pre-filled from the focused annotated set",
 
             Self::TransformNextField => "move to the next form field",
             Self::TransformPrevField => "move to the previous form field",
@@ -332,6 +387,13 @@ impl Action {
             Self::VariantOpenCarrierView => "show carrier samples for the focused variant",
             Self::VariantCloseCarrierView => "close the carrier panel",
             Self::VariantClose => "leave the variant browser",
+
+            Self::ResultsScrollUp => "move row focus up",
+            Self::ResultsScrollDown => "move row focus down",
+            Self::ResultsCycleSort => "cycle the table sort key",
+            Self::ResultsCycleMask => "load the next mask result file",
+            Self::ResultsOpenVariants => "open the variant browser filtered to the focused gene",
+            Self::ResultsClose => "leave the results screen",
         }
     }
 
@@ -351,8 +413,13 @@ impl Action {
             Self::WorkspaceUp => Some((KeyCode::Char('k'), none)),
             Self::WorkspaceDown => Some((KeyCode::Char('j'), none)),
             Self::WorkspaceRescan => Some((KeyCode::Char('r'), none)),
-            Self::WorkspaceOpenSetup => Some((KeyCode::Char('s'), none)),
+            Self::WorkspaceOpenSetup => Some((KeyCode::Char('S'), KeyModifiers::SHIFT)),
             Self::WorkspaceOpenFocused => Some((KeyCode::Enter, none)),
+            Self::WorkspaceOpenParent => Some((KeyCode::Char('p'), none)),
+            Self::WorkspaceToggleSelect => Some((KeyCode::Char(' '), none)),
+            Self::WorkspaceToggleVisualMode => Some((KeyCode::Char('v'), none)),
+            Self::WorkspaceSelectAllInGroup => Some((KeyCode::Char('a'), none)),
+            Self::OpenStaarForm => Some((KeyCode::Char('s'), none)),
 
             Self::TransformNextField => Some((KeyCode::Tab, none)),
             Self::TransformPrevField => Some((KeyCode::BackTab, KeyModifiers::SHIFT)),
@@ -397,6 +464,13 @@ impl Action {
             Self::VariantOpenCarrierView => Some((KeyCode::Char('c'), none)),
             Self::VariantCloseCarrierView => Some((KeyCode::Esc, none)),
             Self::VariantClose => Some((KeyCode::Char('q'), none)),
+
+            Self::ResultsScrollUp => Some((KeyCode::Char('k'), none)),
+            Self::ResultsScrollDown => Some((KeyCode::Char('j'), none)),
+            Self::ResultsCycleSort => Some((KeyCode::Char('s'), none)),
+            Self::ResultsCycleMask => Some((KeyCode::Char('m'), none)),
+            Self::ResultsOpenVariants => Some((KeyCode::Enter, none)),
+            Self::ResultsClose => Some((KeyCode::Char('q'), none)),
         }
     }
 }
