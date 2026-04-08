@@ -322,8 +322,8 @@ impl Action {
             Self::ClosePalette => Some((KeyCode::Esc, none)),
             Self::ClosePaletteAndRun => Some((KeyCode::Enter, none)),
 
-            Self::WorkspaceUp => Some((KeyCode::Char('k'), none)),
-            Self::WorkspaceDown => Some((KeyCode::Char('j'), none)),
+            Self::WorkspaceUp => Some((KeyCode::Up, none)),
+            Self::WorkspaceDown => Some((KeyCode::Down, none)),
             Self::WorkspaceRescan => Some((KeyCode::Char('r'), none)),
             Self::WorkspaceOpenSetup => Some((KeyCode::Char('s'), none)),
             Self::WorkspaceOpenFocused => Some((KeyCode::Enter, none)),
@@ -336,8 +336,8 @@ impl Action {
             Self::TransformClearField => Some((KeyCode::Backspace, none)),
             Self::TransformCancel => Some((KeyCode::Esc, none)),
 
-            Self::PickerUp => Some((KeyCode::Char('k'), none)),
-            Self::PickerDown => Some((KeyCode::Char('j'), none)),
+            Self::PickerUp => Some((KeyCode::Up, none)),
+            Self::PickerDown => Some((KeyCode::Down, none)),
             Self::PickerInto => Some((KeyCode::Enter, none)),
             Self::PickerParent => Some((KeyCode::Left, none)),
             Self::PickerSelect => Some((KeyCode::Char(' '), none)),
@@ -351,8 +351,8 @@ impl Action {
             Self::HelpClose => Some((KeyCode::Esc, none)),
             Self::HelpCycleScope => Some((KeyCode::Tab, none)),
 
-            Self::VariantScrollRowUp => Some((KeyCode::Char('k'), none)),
-            Self::VariantScrollRowDown => Some((KeyCode::Char('j'), none)),
+            Self::VariantScrollRowUp => Some((KeyCode::Up, none)),
+            Self::VariantScrollRowDown => Some((KeyCode::Down, none)),
             Self::VariantPrevRowGroup => Some((KeyCode::Char('{'), none)),
             Self::VariantNextRowGroup => Some((KeyCode::Char('}'), none)),
             Self::VariantJumpStart => Some((KeyCode::Char('g'), none)),
@@ -367,6 +367,24 @@ impl Action {
             Self::VariantCloseCarrierView => Some((KeyCode::Esc, none)),
             Self::VariantOpenLinked => Some((KeyCode::Enter, none)),
             Self::VariantClose => Some((KeyCode::Char('q'), none)),
+        }
+    }
+
+    pub fn alt_keys(&self) -> &'static [KeyBinding] {
+        const NONE: KeyModifiers = KeyModifiers::NONE;
+        match self {
+            Self::WorkspaceUp => &[(KeyCode::Char('k'), NONE)],
+            Self::WorkspaceDown => &[(KeyCode::Char('j'), NONE), (KeyCode::Tab, NONE)],
+            Self::PickerUp => &[(KeyCode::Char('k'), NONE)],
+            Self::PickerDown => &[(KeyCode::Char('j'), NONE)],
+            Self::PickerParent => &[(KeyCode::Backspace, NONE)],
+            Self::TransformNextField => &[(KeyCode::Down, NONE)],
+            Self::TransformPrevField => &[(KeyCode::Up, NONE)],
+            Self::VariantScrollRowUp => &[(KeyCode::Char('k'), NONE)],
+            Self::VariantScrollRowDown => &[(KeyCode::Char('j'), NONE)],
+            Self::VariantPrevRowGroup => &[(KeyCode::PageUp, NONE)],
+            Self::VariantNextRowGroup => &[(KeyCode::PageDown, NONE)],
+            _ => &[],
         }
     }
 }
@@ -421,11 +439,15 @@ impl KeyMap {
     }
 
     pub fn for_scope(scope: ActionScope) -> Self {
-        let entries: Vec<_> = ACTIONS_ALL
-            .iter()
-            .filter(|a| a.scope() == scope)
-            .filter_map(|a| a.default_key().map(|(c, m)| (c, m, *a)))
-            .collect();
+        let mut entries: Vec<(KeyCode, KeyModifiers, Action)> = Vec::new();
+        for action in ACTIONS_ALL.iter().filter(|a| a.scope() == scope) {
+            if let Some((c, m)) = action.default_key() {
+                entries.push((c, m, *action));
+            }
+            for (c, m) in action.alt_keys() {
+                entries.push((*c, *m, *action));
+            }
+        }
         Self { entries }
     }
 

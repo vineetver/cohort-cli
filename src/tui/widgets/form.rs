@@ -58,6 +58,18 @@ impl Form {
             .insert(id, FieldData::Multi(FieldValue::Edited(items)));
     }
 
+    pub fn set_text(&mut self, id: &'static str, text: String) {
+        self.values
+            .values
+            .insert(id, FieldData::Text(FieldValue::Edited(text)));
+    }
+
+    pub fn set_number(&mut self, id: &'static str, n: f64) {
+        self.values
+            .values
+            .insert(id, FieldData::Number(FieldValue::Edited(n)));
+    }
+
     fn rows(&self) -> Vec<Row<'_>> {
         let mut rows: Vec<Row> = self
             .schema

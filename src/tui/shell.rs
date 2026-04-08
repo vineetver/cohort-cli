@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::tui::action::{format_binding, Action, ActionScope, KeyMap};
+use crate::tui::action::{format_binding, Action, ActionScope};
 use crate::tui::theme;
 
 pub mod graph_strip;
@@ -111,25 +111,24 @@ fn render_error_slot(area: Rect, buf: &mut Buffer, error: Option<&ErrorMessage>)
 }
 
 fn render_hint_bar(area: Rect, buf: &mut Buffer, scope: ActionScope) {
-    let bindings = KeyMap::for_scope(scope);
-    let entries = bindings.entries();
-    let mut spans: Vec<Span> = Vec::with_capacity(entries.len() * 3);
-    for (i, (code, mods, action)) in entries.iter().enumerate() {
-        if i > 0 {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut first = true;
+    for action in Action::all().iter().filter(|a| a.scope() == scope) {
+        let Some((code, mods)) = action.default_key() else {
+            continue;
+        };
+        if !first {
             spans.push(Span::styled("  ", theme::hint_bar_style()));
         }
+        first = false;
         spans.push(Span::styled(
-            format_binding(*code, *mods),
+            format_binding(code, mods),
             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            format!(" {}", action_label(*action)),
+            format!(" {}", action.title()),
             theme::hint_bar_style(),
         ));
     }
     Paragraph::new(Line::from(spans)).render(area, buf);
-}
-
-fn action_label(action: Action) -> &'static str {
-    action.title()
 }

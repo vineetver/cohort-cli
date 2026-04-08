@@ -187,6 +187,11 @@ impl App {
                         return variant::handle_modal_key(&mut self.state, k);
                     }
                 }
+                if let View::Stage(s) = &self.state.view {
+                    if matches!(s.editor, stage_view::Editor::Text(_)) {
+                        return stage_view::handle_text_key(&mut self.state, k);
+                    }
+                }
                 let scope = self.state.active_scope();
                 let scope_keys = KeyMap::for_scope(scope);
                 if let Some(action) = scope_keys.lookup(k.code, k.modifiers) {

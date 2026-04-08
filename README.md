@@ -51,6 +51,26 @@ cohort staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
 
 All commands support `--format json` and `--dry-run`. See [AGENTS.md](AGENTS.md) for the machine interface.
 
+## Why it scales
+
+COHORT is built for biobank-scale rare-variant work, where the main bottlenecks are not the same as small-cohort pipelines.
+
+Current shape:
+
+- sparse carrier storage instead of dense sample-by-variant matrices
+- one aligned variant index, `variant_vcf`, across metadata, masks, and score cache
+- score-cache reuse so mask changes do not trigger genotype I/O again
+
+High-ROI work in flight:
+
+| Area | Why it matters at biobank scale | Milestone |
+|---|---|---|
+| unified compute and memory control | stops thread-pool oversubscription and untracked scratch growth | [v0.5.0](https://github.com/vineetver/cohort-cli/milestone/5) |
+| sample-side index | fixes the weakest query pattern today: sample, trio, and family lookups | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
+| fragment-backed store | removes full rebuilds when the store changes | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
+| interval-aware region queries | fixes long indel / SV overlap correctness | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
+| object-store reads | opens the path to shared and cloud-backed cohorts | [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) |
+
 ## STAAR architecture
 
 Genotypes are stored as a canonical sparse matrix **G** over `(sample_id, variant_vcf)`. All queries — region, gene, MAF, annotation — resolve to aligned vectors over `variant_vcf`. Scoring is carrier-indexed at **O(total_MAC)**, not O(n_samples x n_variants).
@@ -63,7 +83,7 @@ Genotypes are stored as a canonical sparse matrix **G** over `(sample_id, varian
 
 Interactive results: Plotly.js summary with Manhattan, QQ, and volcano plots.
 
-See [docs/storage.md](docs/storage.md) for the storage format and [docs/validation.md](docs/validation.md) for validation against the R STAARpipeline.
+See [docs/storage.md](docs/storage.md) for the store layout and current query behavior, [docs/performance.md](docs/performance.md) for hot paths and active work, and [docs/validation.md](docs/validation.md) for validation against the R STAARpipeline.
 
 ## Data packs
 
@@ -83,7 +103,9 @@ Tracked in [GitHub Issues](https://github.com/vineetver/cohort-cli/issues) with 
 
 | Milestone | Focus |
 |-----------|-------|
-| [v0.2.0](https://github.com/vineetver/cohort-cli/milestone/1) | STAAR hardening: GRM, multi-VCF, AI-STAAR, MultiSTAAR, performance |
+| [v0.5.0](https://github.com/vineetver/cohort-cli/milestone/5) | memory and thread pool overhaul: one compute handle, bounded scratch, better machine-visible memory |
+| [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6) | storage and query engine: sample index, fragments, interval-aware regions, object-store reads, query commands |
+| [v0.2.0](https://github.com/vineetver/cohort-cli/milestone/1) | STAAR hardening: GRM, multi-VCF, AI-STAAR, MultiSTAAR |
 | [v0.3.0](https://github.com/vineetver/cohort-cli/milestone/2) | MetaSTAAR: cross-biobank meta-analysis |
 | [v0.4.0](https://github.com/vineetver/cohort-cli/milestone/3) | Variant interpretation: scoring, fine-mapping, colocalization, V2G |
 | [v1.0.0](https://github.com/vineetver/cohort-cli/milestone/4) | Nextflow orchestration, provenance, QC |

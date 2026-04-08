@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -25,10 +25,18 @@ pub struct MultiPickerState {
     pub checked: Vec<bool>,
 }
 
+pub struct TextEditorState {
+    pub field_id: &'static str,
+    pub label: &'static str,
+    pub buf: String,
+    pub numeric: bool,
+}
+
 pub enum Editor {
     None,
     Path(DirBrowserState, &'static str),
     Multi(MultiPickerState),
+    Text(TextEditorState),
 }
 
 pub struct StageViewState {
@@ -82,6 +90,37 @@ fn open_path_picker(view: &mut StageViewState, id: &'static str) {
         DirBrowserState::with_files("Select path", &start, show_files),
         id,
     );
+}
+
+fn open_text_editor(view: &mut StageViewState, id: &'static str) {
+    let (label, buf, numeric) = match view.form.field(id) {
+        Some(FormField::Text { label, .. }) => {
+            let cur = view.form.values().text(id).unwrap_or("").to_string();
+            (*label, cur, false)
+        }
+        Some(FormField::Number { label, .. }) => {
+            let cur = view
+                .form
+                .values()
+                .number(id)
+                .map(|n| {
+                    if n.fract() == 0.0 {
+                        format!("{n:.0}")
+                    } else {
+                        format!("{n}")
+                    }
+                })
+                .unwrap_or_default();
+            (*label, cur, true)
+        }
+        _ => return,
+    };
+    view.editor = Editor::Text(TextEditorState {
+        field_id: id,
+        label,
+        buf,
+        numeric,
+    });
 }
 
 fn open_multi_picker(view: &mut StageViewState, id: &'static str) {
@@ -146,6 +185,9 @@ fn drive_form(state: &mut AppState, code: KeyCode) -> Outcome {
             match view.form.field(id) {
                 Some(FormField::Path { .. }) => open_path_picker(view, id),
                 Some(FormField::MultiSelect { .. }) => open_multi_picker(view, id),
+                Some(FormField::Text { .. }) | Some(FormField::Number { .. }) => {
+                    open_text_editor(view, id);
+                }
                 _ => {}
             }
             Outcome::Stay
@@ -169,6 +211,54 @@ fn form_error_text(err: &FormError) -> String {
     }
 }
 
+pub fn handle_text_key(state: &mut AppState, key: KeyEvent) -> Outcome {
+    let View::Stage(view) = &mut state.view else {
+        return Outcome::Stay;
+    };
+    let Editor::Text(text) = &mut view.editor else {
+        return Outcome::Stay;
+    };
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => {
+            view.editor = Editor::None;
+        }
+        (KeyCode::Enter, _) => {
+            let id = text.field_id;
+            if text.numeric {
+                match text.buf.trim().parse::<f64>() {
+                    Ok(n) => {
+                        view.form.set_number(id, n);
+                        view.editor = Editor::None;
+                        state.error = None;
+                    }
+                    Err(_) => {
+                        state.error = Some(ErrorMessage {
+                            text: format!("not a number: {}", text.buf),
+                        });
+                    }
+                }
+            } else {
+                view.form.set_text(id, text.buf.clone());
+                view.editor = Editor::None;
+                state.error = None;
+            }
+        }
+        (KeyCode::Backspace, _) => {
+            text.buf.pop();
+        }
+        (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+            text.buf.clear();
+        }
+        (KeyCode::Char(c), m)
+            if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
+            text.buf.push(c);
+        }
+        _ => {}
+    }
+    Outcome::Stay
+}
+
 pub fn render(state: &mut AppState, frame: &mut Frame, area: Rect) {
     let View::Stage(view) = &mut state.view else {
         return;
@@ -180,6 +270,10 @@ pub fn render(state: &mut AppState, frame: &mut Frame, area: Rect) {
         }
         Editor::Multi(state) => {
             draw_multi(frame, area, state);
+            return;
+        }
+        Editor::Text(text) => {
+            draw_text(frame, area, text);
             return;
         }
         Editor::None => {}
@@ -238,6 +332,42 @@ fn draw_multi(frame: &mut Frame, area: Rect, state: &MultiPickerState) {
     frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[2]);
 }
 
+fn draw_text(frame: &mut Frame, area: Rect, state: &TextEditorState) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let title = Paragraph::new(Line::from(Span::styled(
+        format!("  edit {}", state.label),
+        Style::default().fg(theme::ACCENT).bold(),
+    )));
+    frame.render_widget(title, layout[0]);
+
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(state.buf.as_str(), Style::default().fg(theme::FG)),
+        Span::styled("_", Style::default().fg(theme::ACCENT)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT)),
+    );
+    frame.render_widget(input, layout[1]);
+
+    let hint = if state.numeric {
+        "  type a number   enter commit   ctrl-u clear   esc cancel"
+    } else {
+        "  type text   enter commit   ctrl-u clear   esc cancel"
+    };
+    frame.render_widget(Paragraph::new(hint).style(theme::hint_bar_style()), layout[3]);
+}
+
 pub fn handle_action(state: &mut AppState, action: Action) -> Outcome {
     let View::Stage(view) = &mut state.view else {
         return Outcome::Stay;
@@ -258,6 +388,15 @@ pub fn handle_action(state: &mut AppState, action: Action) -> Outcome {
                         view.form.set_path(id, Some(chosen));
                         state.error = None;
                     }
+                }
+            }
+            Action::PickerSelect => {
+                let dir = picker.current_dir.clone();
+                if let Editor::Path(_, id) =
+                    std::mem::replace(&mut view.editor, Editor::None)
+                {
+                    view.form.set_path(id, Some(dir));
+                    state.error = None;
                 }
             }
             _ => {}
