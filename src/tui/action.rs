@@ -77,6 +77,7 @@ pub enum Action {
     RunReturn,
 
     HelpClose,
+    HelpCycleScope,
 
     SetupCancel,
     SetupConfirm,
@@ -138,6 +139,7 @@ const ACTIONS_ALL: &[Action] = &[
     Action::RunCancelRequest,
     Action::RunReturn,
     Action::HelpClose,
+    Action::HelpCycleScope,
     Action::VariantScrollRowUp,
     Action::VariantScrollRowDown,
     Action::VariantPrevRowGroup,
@@ -195,7 +197,7 @@ impl Action {
 
             Self::RunCancelRequest | Self::RunReturn => ActionScope::Run,
 
-            Self::HelpClose => ActionScope::Help,
+            Self::HelpClose | Self::HelpCycleScope => ActionScope::Help,
 
             Self::VariantScrollRowUp
             | Self::VariantScrollRowDown
@@ -249,6 +251,7 @@ impl Action {
             Self::RunReturn => "Return",
 
             Self::HelpClose => "Close help",
+            Self::HelpCycleScope => "Cycle scope",
 
             Self::SetupCancel => "Cancel setup",
             Self::SetupConfirm => "Confirm",
@@ -309,6 +312,7 @@ impl Action {
             Self::RunReturn => "return to the previous screen",
 
             Self::HelpClose => "close help",
+            Self::HelpCycleScope => "expand the next scope group",
 
             Self::SetupCancel => "exit the setup wizard",
             Self::SetupConfirm => "confirm the current selection",
@@ -374,6 +378,7 @@ impl Action {
             Self::RunReturn => Some((KeyCode::Enter, none)),
 
             Self::HelpClose => Some((KeyCode::Esc, none)),
+            Self::HelpCycleScope => Some((KeyCode::Tab, none)),
 
             Self::SetupCancel => Some((KeyCode::Esc, none)),
             Self::SetupConfirm => Some((KeyCode::Enter, none)),
