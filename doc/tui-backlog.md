@@ -20,3 +20,4 @@
 2026-04-07 [workspace-chaining] enter on artifact pushes pre-filled next-stage transform; chain shown in hint bar
 2026-04-07 [help-scope-focus] help opens with originating scope expanded, others collapsed, Tab cycles
 2026-04-07 [session-persistence-foundation] SessionStore atomic load/save at ~/.cohort/sessions/<id>/state.json, restored on launch
+2026-04-07 [run-cancel-honesty] bail_if_cancelled at honest stage boundaries; cancel/detach hint disambiguated; green check only on real success
