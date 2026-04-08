@@ -34,6 +34,7 @@ pub struct IngestForm {
     emit_sql_origin: FieldOrigin,
     build: Option<GenomeBuild>,
     build_origin: FieldOrigin,
+    advanced_open: bool,
 }
 
 impl IngestForm {
@@ -51,29 +52,36 @@ impl IngestForm {
             emit_sql_origin: FieldOrigin::Inferred,
             build: None,
             build_origin: FieldOrigin::Inferred,
+            advanced_open: false,
         }
+    }
+
+    fn visible_fields(&self) -> Vec<usize> {
+        let mut v = vec![0, 1, 2];
+        if self.advanced_open {
+            v.push(3);
+            v.push(4);
+        }
+        v
     }
 
     fn field_origin(&self, idx: usize) -> FieldOrigin {
         match idx {
             0 => self.inputs_origin,
             1 => self.output_origin,
-            2 => self.emit_sql_origin,
-            3 => self.build_origin,
+            3 => self.emit_sql_origin,
+            4 => self.build_origin,
             _ => FieldOrigin::Edited,
         }
-    }
-
-    fn field_count(&self) -> usize {
-        4
     }
 
     fn field_label(&self, idx: usize) -> &'static str {
         match idx {
             0 => "inputs",
             1 => "output",
-            2 => "emit SQL",
-            3 => "build",
+            2 => "advanced",
+            3 => "emit SQL",
+            4 => "build",
             _ => "",
         }
     }
@@ -93,8 +101,9 @@ impl IngestForm {
                 Some(p) => p.display().to_string(),
                 None => "(derived from first input)".into(),
             },
-            2 => if self.emit_sql { "yes" } else { "no" }.into(),
-            3 => match self.build {
+            2 => if self.advanced_open { "[-]" } else { "[+]" }.into(),
+            3 => if self.emit_sql { "yes" } else { "no" }.into(),
+            4 => match self.build {
                 Some(GenomeBuild::Hg38) => "hg38".into(),
                 Some(GenomeBuild::Hg19) => "hg19".into(),
                 None => "(auto-detect)".into(),
@@ -120,6 +129,10 @@ impl IngestForm {
             None => {}
         }
         parts.join(" ")
+    }
+
+    fn toggle_advanced(&mut self) {
+        self.advanced_open = !self.advanced_open;
     }
 
     fn to_config(&self) -> Result<IngestConfig, String> {
@@ -187,8 +200,8 @@ impl AnnotateForm {
         }
     }
 
-    fn field_count(&self) -> usize {
-        4
+    fn visible_fields(&self) -> Vec<usize> {
+        vec![0, 1, 2, 3]
     }
 
     fn field_origin(&self, idx: usize) -> FieldOrigin {
@@ -321,11 +334,15 @@ impl TransformScreen {
         }
     }
 
-    fn field_count(&self) -> usize {
+    fn visible_fields(&self) -> Vec<usize> {
         match &self.form {
-            FormState::Ingest(f) => f.field_count(),
-            FormState::Annotate(f) => f.field_count(),
+            FormState::Ingest(f) => f.visible_fields(),
+            FormState::Annotate(f) => f.visible_fields(),
         }
+    }
+
+    fn field_count(&self) -> usize {
+        self.visible_fields().len()
     }
 
     fn run_field_idx(&self) -> usize {
@@ -334,6 +351,10 @@ impl TransformScreen {
 
     fn focus_count(&self) -> usize {
         self.field_count() + 1
+    }
+
+    fn current_field_id(&self) -> Option<usize> {
+        self.visible_fields().get(self.focus).copied()
     }
 
     fn field_origin(&self, idx: usize) -> FieldOrigin {
@@ -364,7 +385,11 @@ impl TransformScreen {
     }
 
     fn open_picker_for_focus(&mut self) {
-        let (target, start, prompt, show_files) = match (&self.form, self.focus) {
+        let fid = match self.current_field_id() {
+            Some(i) => i,
+            None => return,
+        };
+        let (target, start, prompt, show_files) = match (&self.form, fid) {
             (FormState::Ingest(_), 0) => (
                 PickerTarget::IngestAddInput,
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -435,13 +460,21 @@ impl TransformScreen {
         if self.focus == self.run_field_idx() {
             return self.try_run();
         }
-        match (&mut self.form, self.focus) {
+        let fid = match self.current_field_id() {
+            Some(i) => i,
+            None => return Transition::Stay,
+        };
+        match (&mut self.form, fid) {
             (FormState::Ingest(f), 2) => {
+                f.toggle_advanced();
+                Transition::Stay
+            }
+            (FormState::Ingest(f), 3) => {
                 f.emit_sql = !f.emit_sql;
                 f.emit_sql_origin = FieldOrigin::Edited;
                 Transition::Stay
             }
-            (FormState::Ingest(f), 3) => {
+            (FormState::Ingest(f), 4) => {
                 f.build = match f.build {
                     None => Some(GenomeBuild::Hg38),
                     Some(GenomeBuild::Hg38) => Some(GenomeBuild::Hg19),
@@ -466,7 +499,11 @@ impl TransformScreen {
     }
 
     fn clear_input_at_focus(&mut self) {
-        match (&mut self.form, self.focus) {
+        let fid = match self.current_field_id() {
+            Some(i) => i,
+            None => return,
+        };
+        match (&mut self.form, fid) {
             (FormState::Ingest(f), 0) => {
                 f.inputs.clear();
                 f.inputs_origin = FieldOrigin::Edited;
@@ -515,13 +552,16 @@ impl Screen for TransformScreen {
             .split(area);
 
         let run_focused = self.focus == self.run_field_idx();
-        let items: Vec<ListItem> = (0..self.field_count())
-            .map(|i| {
-                let is_focus = i == self.focus;
-                let origin = self.field_origin(i);
+        let visible = self.visible_fields();
+        let items: Vec<ListItem> = visible
+            .iter()
+            .enumerate()
+            .map(|(pos, &fid)| {
+                let is_focus = pos == self.focus;
+                let origin = self.field_origin(fid);
                 let (label, value) = match &self.form {
-                    FormState::Ingest(f) => (f.field_label(i), f.field_value(i)),
-                    FormState::Annotate(f) => (f.field_label(i), f.field_value(i)),
+                    FormState::Ingest(f) => (f.field_label(fid), f.field_value(fid)),
+                    FormState::Annotate(f) => (f.field_label(fid), f.field_value(fid)),
                 };
                 let value_color = match origin {
                     FieldOrigin::Inferred => theme::MUTED,
