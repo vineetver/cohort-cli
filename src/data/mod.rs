@@ -27,6 +27,7 @@ pub struct Pack {
     pub description: &'static str,
     pub source: &'static str,
     pub size_human: &'static str,
+    #[allow(dead_code)]
     pub size_bytes: u64,
     pub always_installed: bool,
     pub version: &'static str,

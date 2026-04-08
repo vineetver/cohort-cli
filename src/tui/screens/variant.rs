@@ -125,7 +125,7 @@ impl VariantScreen {
             .collect();
         let mask = ProjectionMask::leaves(
             self.scroller.metadata().parquet_schema(),
-            leaves.into_iter(),
+            leaves,
         );
         self.scroller.set_projection(mask)
     }
@@ -412,7 +412,7 @@ impl VariantScreen {
         let mut header_spans = vec![Span::raw(blank_gutter.clone())];
         header_spans.extend(cols.iter().zip(widths.iter()).map(|(c, w)| {
             Span::styled(
-                pad(&schema.field(*c).name(), *w),
+                pad(schema.field(*c).name(), *w),
                 Style::default().fg(theme::ACCENT).bold(),
             )
         }));
@@ -479,7 +479,7 @@ impl VariantScreen {
             })
             .collect();
 
-        let half = (pairs.len() + 1) / 2;
+        let half = pairs.len().div_ceil(2);
         let max_rows = inner.height as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
         for i in 0..half.min(max_rows) {

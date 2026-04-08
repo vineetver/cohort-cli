@@ -174,7 +174,7 @@ impl AnnotateForm {
     fn from_artifact(art: &Artifact) -> Self {
         let cfg = Config::load().ok();
         let tier = cfg.as_ref().map(|c| c.data.tier).unwrap_or(Tier::Base);
-        let data_root = cfg.map(|c| c.root_dir()).unwrap_or_else(PathBuf::new);
+        let data_root = cfg.map(|c| c.root_dir()).unwrap_or_default();
         Self {
             input: art.path.clone(),
             input_origin: FieldOrigin::Inferred,

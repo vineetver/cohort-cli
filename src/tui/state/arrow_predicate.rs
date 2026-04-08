@@ -238,7 +238,7 @@ impl RowFilterFactory for CompiledFilter {
             if !field_indices.contains(&idx) {
                 field_indices.push(idx);
             }
-            check_clause_against_field(&clause, schema.field(idx))?;
+            check_clause_against_field(clause, schema.field(idx))?;
         }
         let mask =
             ProjectionMask::leaves(meta.parquet_schema(), field_indices.iter().copied());
@@ -323,7 +323,7 @@ fn eval_clause(
     let dt = array.data_type().clone();
     if matches!(clause.op, Op::Contains) {
         let needle = literal_to_string(&clause.literal);
-        return Ok(string_contains(array, &needle)?);
+        return string_contains(array, &needle);
     }
     let lit_f = literal_to_f64(&clause.literal);
     let lit_str = literal_to_string(&clause.literal);
