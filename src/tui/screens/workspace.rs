@@ -140,7 +140,7 @@ fn next_stage_for(kind: &ArtifactKind) -> Option<&'static dyn Stage> {
     STAGES
         .iter()
         .copied()
-        .find(|s| s.inputs().iter().any(|i| *i == sk))
+        .find(|s| s.inputs().contains(&sk))
 }
 
 fn can_browse(kind: &ArtifactKind) -> bool {
