@@ -1,6 +1,6 @@
 use std::io::{self, Stdout};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -16,18 +16,17 @@ use crate::output::Output;
 
 use super::action::{Action, KeyMap};
 use super::event::AppEvent;
-use super::output::{BarRegistry, LogLevel, LogLine, ProgressSnapshot, TuiOutput};
-use super::screen::{RunRequest, Screen, Transition};
+use super::output::{BarRegistry, LogLine, ProgressSnapshot, TuiOutput};
+use super::screen::{Screen, Transition};
 use super::screens::help::HelpScreen;
+use super::stages::types::{RunRequest, SetupConfig};
 use super::state::{SessionId, SessionState, SessionStore};
-use super::widgets::log_tail::LogTail;
 use super::widgets::palette::{Palette, PaletteOutcome};
-use super::widgets::run_overlay::{dim_area, RunOutcome, RunOverlay};
+use super::widgets::run_overlay::{dim_area, RunOverlay};
+use crate::staar::pipeline::StaarPipeline;
 
 struct BarEntry {
-    id: u64,
     arc: Arc<ProgressBar>,
-    finished_once: bool,
 }
 
 pub struct App {
@@ -35,8 +34,6 @@ pub struct App {
     log_rx: Receiver<LogLine>,
     shared_bars: BarRegistry,
     bars: Vec<BarEntry>,
-    next_bar_id: u64,
-    log: LogTail,
     tui_out: Arc<TuiOutput>,
     cmd_tx: Sender<Result<(), CohortError>>,
     cmd_rx: Receiver<Result<(), CohortError>>,
@@ -44,6 +41,7 @@ pub struct App {
     palette: Option<Palette>,
     overlay: Option<RunOverlay>,
     session_store: Option<SessionStore>,
+    setup_sink: Option<Arc<Mutex<Option<SetupConfig>>>>,
 }
 
 impl App {
@@ -77,8 +75,6 @@ impl App {
             log_rx,
             shared_bars,
             bars: Vec::new(),
-            next_bar_id: 0,
-            log: LogTail::new(256),
             tui_out,
             cmd_tx,
             cmd_rx,
@@ -86,7 +82,13 @@ impl App {
             palette: None,
             overlay: None,
             session_store,
+            setup_sink: None,
         }
+    }
+
+    pub fn with_setup_sink(mut self, sink: Arc<Mutex<Option<SetupConfig>>>) -> Self {
+        self.setup_sink = Some(sink);
+        self
     }
 
     fn save_session(&self) {
@@ -114,14 +116,13 @@ impl App {
                 last_title = current_title;
             }
             {
-                let log_ref: &LogTail = &self.log;
                 let palette_ref = self.palette.as_ref();
                 let overlay_ref = self.overlay.as_ref();
                 let screen = &mut self.screens[top_idx];
                 terminal
                     .draw(|f| {
                         let area = f.area();
-                        screen.draw(f, area, log_ref);
+                        screen.draw(f, area);
                         if let Some(o) = overlay_ref {
                             let buf = f.buffer_mut();
                             dim_area(area, buf);
@@ -145,22 +146,9 @@ impl App {
                             return Ok(());
                         }
                         if let Some(overlay) = self.overlay.as_mut() {
-                            if let Some(outcome) = overlay.handle(k) {
+                            if overlay.handle(k).is_some() {
                                 debug_assert!(overlay.is_finished());
                                 self.overlay = None;
-                                match outcome {
-                                    RunOutcome::Succeeded { artifact } => {
-                                        let _ = self.screens[top_idx]
-                                            .handle(&AppEvent::RunFinished(artifact));
-                                    }
-                                    RunOutcome::Failed { error } => {
-                                        self.log.push_log(LogLine {
-                                            level: LogLevel::Error,
-                                            message: error,
-                                        });
-                                    }
-                                    RunOutcome::Cancelled => {}
-                                }
                             }
                             continue;
                         }
@@ -271,11 +259,6 @@ impl App {
                 self.screens.push(s);
                 true
             }
-            Transition::Replace(s) => {
-                self.screens.pop();
-                self.screens.push(s);
-                true
-            }
             Transition::Run(req) => {
                 let cancel = self.tui_out.arm_cancel();
                 self.overlay = Some(RunOverlay::launch(&req, cancel));
@@ -286,6 +269,11 @@ impl App {
     }
 
     fn spawn_command(&self, req: RunRequest) {
+        if let RunRequest::Setup(cfg) = &req {
+            if let Some(sink) = self.setup_sink.as_ref() {
+                *sink.lock().unwrap() = Some(cfg.clone());
+            }
+        }
         let out = Arc::clone(&self.tui_out);
         let tx = self.cmd_tx.clone();
         std::thread::spawn(move || {
@@ -300,17 +288,11 @@ impl App {
                 if let Some(o) = self.overlay.as_mut() {
                     o.push_log(line.clone());
                 }
-                self.log.push_log(line.clone());
             }
             AppEvent::ProgressUpdate(snap) => {
                 if let Some(o) = self.overlay.as_mut() {
                     o.push_progress(snap.clone());
                 }
-                self.log.push_snapshot(snap.clone());
-            }
-            AppEvent::ProgressSweep(id) => self.log.sweep(*id),
-            AppEvent::RunFinished(path) => {
-                let _ = path.as_path();
             }
             AppEvent::CommandDone(res) => {
                 if let Some(o) = self.overlay.as_mut() {
@@ -336,9 +318,7 @@ impl App {
         {
             let mut shared = self.shared_bars.lock().unwrap();
             for arc in shared.drain(..) {
-                let id = self.next_bar_id;
-                self.next_bar_id += 1;
-                self.bars.push(BarEntry { id, arc, finished_once: false });
+                self.bars.push(BarEntry { arc });
             }
         }
         for entry in &self.bars {
@@ -347,26 +327,13 @@ impl App {
             let length = length_opt.unwrap_or(u64::MAX);
             let indeterminate = length_opt.map(|l| l == u64::MAX).unwrap_or(true);
             events.push(AppEvent::ProgressUpdate(ProgressSnapshot {
-                id: entry.id,
                 position: pb.position(),
                 length,
                 message: pb.message().to_string(),
                 indeterminate,
-                finished: pb.is_finished(),
             }));
         }
-        let mut keep = Vec::with_capacity(self.bars.len());
-        for mut entry in self.bars.drain(..) {
-            if entry.arc.is_finished() && entry.finished_once {
-                events.push(AppEvent::ProgressSweep(entry.id));
-            } else {
-                if entry.arc.is_finished() {
-                    entry.finished_once = true;
-                }
-                keep.push(entry);
-            }
-        }
-        self.bars = keep;
+        self.bars.retain(|entry| !entry.arc.is_finished());
         events
     }
 }
@@ -375,7 +342,29 @@ fn dispatch(req: RunRequest, out: &dyn Output) -> Result<(), CohortError> {
     match req {
         RunRequest::Ingest(cfg) => commands::ingest::run_ingest(&cfg, out),
         RunRequest::Annotate(cfg) => commands::annotate::run_annotate(&cfg, out),
+        RunRequest::Staar(cfg) => StaarPipeline::new(*cfg, out)?.run(),
+        RunRequest::MetaStaar(cfg) => commands::meta_staar::run_meta_staar(&cfg, out),
+        RunRequest::Setup(cfg) => apply_setup(cfg, out),
     }
+}
+
+fn apply_setup(cfg: SetupConfig, out: &dyn Output) -> Result<(), CohortError> {
+    let mut existing = crate::config::Config::load().unwrap_or_default();
+    existing.data.tier = cfg.tier;
+    existing.data.root_dir = cfg.root_dir.to_string_lossy().to_string();
+    existing.data.packs = cfg.packs.clone();
+    if cfg.environment.is_some() {
+        existing.resources.environment = cfg.environment;
+    }
+    if cfg.memory_budget.is_some() {
+        existing.resources.memory_budget = cfg.memory_budget.clone();
+    }
+    existing.save()?;
+    out.success(&format!(
+        "saved configuration to {}",
+        crate::config::Config::config_path().display()
+    ));
+    Ok(())
 }
 
 pub fn make_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {

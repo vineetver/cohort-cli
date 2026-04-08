@@ -2,17 +2,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
-    StringArray, UInt32Array, UInt64Array,
-};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow::datatypes::SchemaRef;
+use arrow::util::display::{ArrayFormatter, FormatOptions};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use parquet::arrow::ProjectionMask;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+};
 use ratatui::Frame;
 
 use crate::column::Col;
@@ -20,14 +21,52 @@ use crate::error::CohortError;
 use crate::staar::carrier::reader::{CarrierList, VariantIndex};
 use crate::staar::sparse_g::SparseG;
 use crate::tui::action::{Action, ActionScope, KeyMap};
-use crate::tui::artifact_view::{ArtifactFilter, ArtifactOutcome, ArtifactView, Predicate};
 use crate::tui::event::AppEvent;
 use crate::tui::screen::{Screen, Transition};
+use crate::tui::shell::{ErrorMessage, ScreenChrome, Shell};
 use crate::tui::state::arrow_predicate::CompiledFilter;
 use crate::tui::state::parquet_scroller::{ParquetScroller, RowFilterFactory};
 use crate::tui::theme;
-use crate::tui::widgets::log_tail::LogTail;
-use crate::tui::widgets::status_bar::StatusBar;
+
+pub struct VariantSpec {
+    pub parquet: PathBuf,
+    pub title_prefix: Option<String>,
+    pub summary: Option<String>,
+    pub companion: Option<PathBuf>,
+}
+
+impl VariantSpec {
+    pub fn for_file(parquet: PathBuf) -> Self {
+        Self { parquet, title_prefix: None, summary: None, companion: None }
+    }
+
+    pub fn for_annotated_set(set_root: PathBuf) -> Result<Self, CohortError> {
+        let parquet = pick_first_chrom_parquet(&set_root)?;
+        let prefix = set_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        Ok(Self { parquet, title_prefix: prefix, summary: None, companion: None })
+    }
+
+    pub fn for_staar_results(
+        results_dir: PathBuf,
+        companion: Option<PathBuf>,
+    ) -> Result<Self, CohortError> {
+        let parquet = first_results_parquet(&results_dir)?;
+        let prefix = results_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let summary = format!(
+            "STAAR results · enter on a row opens {} filtered to that gene",
+            companion
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "companion set".into())
+        );
+        Ok(Self { parquet, title_prefix: prefix, summary: Some(summary), companion })
+    }
+}
 
 pub struct VariantScreen {
     title: String,
@@ -40,7 +79,6 @@ pub struct VariantScreen {
     chrom_cache: HashMap<String, ChromCacheEntry>,
     sample_names: Option<Vec<String>>,
     error: Option<String>,
-    pending_open: Option<(PathBuf, Option<ArtifactFilter>)>,
 }
 
 enum VariantModal {
@@ -62,8 +100,7 @@ struct ColumnsModal {
 
 struct CarrierModal {
     vid: String,
-    carriers: Option<CarrierList>,
-    error: Option<String>,
+    carriers: CarrierList,
     scroll: usize,
 }
 
@@ -73,26 +110,22 @@ struct ChromCacheEntry {
 }
 
 impl VariantScreen {
-    fn open(
-        path: PathBuf,
-        title_prefix: Option<&str>,
-        summary: Option<String>,
-        companion: Option<PathBuf>,
-    ) -> Result<Self, CohortError> {
-        let scroller = ParquetScroller::open(&path)?;
+    pub fn open(spec: VariantSpec) -> Result<Self, CohortError> {
+        let scroller = ParquetScroller::open(&spec.parquet)?;
         let display_columns: Vec<usize> = (0..scroller.schema().fields().len()).collect();
-        let leaf = path
+        let leaf = spec
+            .parquet
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let title = match title_prefix {
+            .unwrap_or_else(|| spec.parquet.display().to_string());
+        let title = match spec.title_prefix {
             Some(p) => format!("{p} :: {leaf}"),
             None => leaf,
         };
         Ok(Self {
             title,
-            summary,
-            companion,
+            summary: spec.summary,
+            companion: spec.companion,
             scroller,
             display_columns,
             active_filter: None,
@@ -100,41 +133,7 @@ impl VariantScreen {
             chrom_cache: HashMap::new(),
             sample_names: None,
             error: None,
-            pending_open: None,
         })
-    }
-
-    pub fn new_for_parquet(path: PathBuf) -> Result<Self, CohortError> {
-        Self::open(path, None, None, None)
-    }
-
-    pub fn new_for_annotated_set(set_path: PathBuf) -> Result<Self, CohortError> {
-        let parquet = pick_first_chrom_parquet(&set_path)?;
-        let prefix = set_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Self::open(parquet, Some(&prefix), None, None)
-    }
-
-    pub fn new_for_staar_results(
-        results_path: PathBuf,
-        companion_annotated_set: Option<PathBuf>,
-    ) -> Result<Self, CohortError> {
-        let parquet = first_results_parquet(&results_path)?;
-        let prefix = results_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let summary = format!(
-            "STAAR results · enter on a row opens {} filtered to that gene",
-            companion_annotated_set
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "companion set".into())
-        );
-        Self::open(parquet, Some(&prefix), Some(summary), companion_annotated_set)
     }
 
     pub fn with_initial_filter(mut self, text: &str) -> Result<Self, CohortError> {
@@ -147,31 +146,39 @@ impl VariantScreen {
         Ok(self)
     }
 
-    fn try_cross_open(&mut self) {
-        let Some((batch, row)) = self.scroller.focused_record() else {
-            return;
-        };
+    fn open_companion_for_focused_gene(&self) -> Result<VariantScreen, CohortError> {
+        let (batch, row) = self
+            .scroller
+            .focused_record()
+            .ok_or_else(|| CohortError::Input("no focused row".into()))?;
         let schema = batch.schema();
-        let Ok(idx) = schema.index_of(Col::GeneName.as_str()) else {
-            self.error = Some("row has no gene_name column".into());
-            return;
-        };
-        let arr = batch.column(idx);
-        let Some(s) = arr.as_any().downcast_ref::<StringArray>() else {
-            return;
-        };
-        if s.is_null(row) {
-            return;
+        let idx = schema
+            .index_of(Col::GeneName.as_str())
+            .map_err(|_| CohortError::Input("row has no gene_name column".into()))?;
+        let arr = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| CohortError::Input("gene_name column has unexpected type".into()))?;
+        if arr.is_null(row) {
+            return Err(CohortError::Input("gene_name is null".into()));
         }
-        let gene = s.value(row).to_string();
-        let Some(target) = self.companion.clone() else {
-            self.error = Some("no companion artifact attached to this view".into());
-            return;
+        let gene = arr.value(row).to_string();
+        let target = self
+            .companion
+            .clone()
+            .ok_or_else(|| CohortError::Input("no companion artifact attached".into()))?;
+        let prefix = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let spec = VariantSpec {
+            parquet: target,
+            title_prefix: prefix,
+            summary: None,
+            companion: None,
         };
-        self.pending_open = Some((
-            target,
-            Some(ArtifactFilter::new(Col::GeneName, Predicate::Eq(gene))),
-        ));
+        let text = format!("{} = \"{}\"", Col::GeneName.as_str(), gene);
+        VariantScreen::open(spec)?.with_initial_filter(&text)
     }
 
     fn rebuild_projection(&mut self) -> Result<(), CohortError> {
@@ -297,32 +304,22 @@ impl VariantScreen {
         let vid = match find_vid(batch, &schema, row) {
             Some(v) => v,
             None => {
-                self.modal = VariantModal::Carrier(CarrierModal {
-                    vid: String::new(),
-                    carriers: None,
-                    error: Some(
-                        "row has no vid and no (chromosome, position, ref_allele, alt_allele) tuple"
-                            .into(),
-                    ),
-                    scroll: 0,
-                });
+                self.error = Some(
+                    "row has no vid and no (chromosome, position, ref_allele, alt_allele) tuple"
+                        .into(),
+                );
                 return;
             }
         };
         let chrom = chrom_from_path_or_batch(self.scroller.path(), batch, &schema, row)
             .unwrap_or_default();
         let path = self.scroller.path().to_path_buf();
-        let mut panel = CarrierModal {
-            vid: vid.clone(),
-            carriers: None,
-            error: None,
-            scroll: 0,
-        };
         match self.load_carriers(&path, &chrom, &vid) {
-            Ok(list) => panel.carriers = Some(list),
-            Err(e) => panel.error = Some(format!("{e}")),
+            Ok(carriers) => {
+                self.modal = VariantModal::Carrier(CarrierModal { vid, carriers, scroll: 0 });
+            }
+            Err(e) => self.error = Some(format!("{e}")),
         }
-        self.modal = VariantModal::Carrier(panel);
     }
 
     fn close_modal(&mut self) {
@@ -431,10 +428,8 @@ impl VariantScreen {
             VariantModal::Carrier(panel) => {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
-                        if let Some(list) = &panel.carriers {
-                            if panel.scroll + 1 < list.len() {
-                                panel.scroll += 1;
-                            }
+                        if panel.scroll + 1 < panel.carriers.len() {
+                            panel.scroll += 1;
                         }
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
@@ -447,13 +442,13 @@ impl VariantScreen {
         }
     }
 
-    fn draw_table(&self, frame: &mut Frame, area: Rect) {
+    fn draw_table(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", self.header_text()))
             .border_style(Style::default().fg(theme::MUTED));
         let inner = block.inner(area);
-        frame.render_widget(block, area);
+        block.render(area, buf);
 
         let Some((batch, focus)) = self.scroller.focused_record() else {
             let msg = if self.scroller.row_group_count() == 0 {
@@ -461,13 +456,11 @@ impl VariantScreen {
             } else {
                 "  no rows in this row group (filter excluded all)"
             };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    msg,
-                    Style::default().fg(theme::MUTED),
-                ))),
-                inner,
-            );
+            Paragraph::new(Line::from(Span::styled(
+                msg,
+                Style::default().fg(theme::MUTED),
+            )))
+            .render(inner, buf);
             return;
         };
 
@@ -522,7 +515,7 @@ impl VariantScreen {
             );
             lines.push(Line::from(spans));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 
     fn header_text(&self) -> String {
@@ -535,13 +528,13 @@ impl VariantScreen {
             "{} · row group {}/{} · {} visible · {} total est · filter: {}",
             self.title, cur, rg.max(1), visible, total, filter
         );
-        match <Self as ArtifactView>::header(self) {
+        match self.summary.as_deref() {
             Some(s) => format!("{base} · {s}"),
             None => base,
         }
     }
 
-    fn draw_detail(&self, frame: &mut Frame, area: Rect) {
+    fn draw_detail(&self, area: Rect, buf: &mut Buffer) {
         let inner = area;
         let Some((batch, row)) = self.scroller.focused_record() else {
             return;
@@ -589,10 +582,10 @@ impl VariantScreen {
                 Style::default().fg(theme::MUTED),
             )));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 
-    fn draw_filter_bar(&self, frame: &mut Frame, area: Rect, modal: &FilterModal) {
+    fn draw_filter_bar(&self, area: Rect, buf: &mut Buffer, modal: &FilterModal) {
         let input = Line::from(vec![
             Span::styled(" filter ", Style::default().fg(theme::WARN).bold()),
             Span::styled("/ ", Style::default().fg(theme::MUTED)),
@@ -603,36 +596,17 @@ impl VariantScreen {
             " e.g. af < 0.01 AND consequence contains missense  (enter apply, esc cancel)",
             theme::hint_bar_style(),
         ));
-        frame.render_widget(Paragraph::new(vec![input, hint]), area);
+        Paragraph::new(vec![input, hint]).render(area, buf);
     }
 
-    fn draw_carrier_panel(&self, frame: &mut Frame, area: Rect, panel: &CarrierModal) {
-        if let Some(err) = &panel.error {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" carriers: {err}"),
-                    Style::default().fg(theme::BAD),
-                ))),
-                area,
-            );
-            return;
-        }
-        let Some(list) = &panel.carriers else {
-            return;
-        };
-        let inner = area;
-        let header = format!(
-            "  {} carriers of {}",
-            list.len(),
-            if panel.vid.is_empty() { "<row>" } else { panel.vid.as_str() }
-        );
-        let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(Span::styled(
-            header,
+    fn draw_carrier_panel(&self, area: Rect, buf: &mut Buffer, panel: &CarrierModal) {
+        let list = &panel.carriers;
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+            format!("  {} carriers of {}", list.len(), panel.vid),
             Style::default().fg(theme::ACCENT).bold(),
-        )));
-        let visible = inner.height.saturating_sub(1) as usize;
+        ))];
         let names = self.sample_names.as_deref().unwrap_or(&[]);
+        let visible = (area.height as usize).saturating_sub(1);
         if panel.scroll > 0 {
             lines.push(Line::from(Span::styled(
                 format!("    ↑ {} above", panel.scroll),
@@ -641,15 +615,9 @@ impl VariantScreen {
         }
         let body_cap = visible.saturating_sub(usize::from(panel.scroll > 0));
         let total = list.entries.len();
-        let end = (panel.scroll + body_cap).min(total);
-        let below = total.saturating_sub(end);
+        let below = total.saturating_sub((panel.scroll + body_cap).min(total));
         let body_take = body_cap.saturating_sub(usize::from(below > 0));
-        for entry in list
-            .entries
-            .iter()
-            .skip(panel.scroll)
-            .take(body_take)
-        {
+        for entry in list.entries.iter().skip(panel.scroll).take(body_take) {
             let name = names
                 .get(entry.sample_idx as usize)
                 .map(|s| s.as_str())
@@ -668,12 +636,12 @@ impl VariantScreen {
                 Style::default().fg(theme::MUTED),
             )));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(area, buf);
     }
 
-    fn draw_column_picker(&self, frame: &mut Frame, area: Rect, picker: &ColumnsModal) {
+    fn draw_column_picker(&self, area: Rect, buf: &mut Buffer, picker: &ColumnsModal) {
         let overlay = centered(area, 50, 70);
-        frame.render_widget(Clear, overlay);
+        Clear.render(overlay, buf);
         let inner = overlay;
         let schema = self.scroller.schema();
         let items: Vec<ListItem> = schema
@@ -695,7 +663,7 @@ impl VariantScreen {
             .collect();
         let mut state = ListState::default();
         state.select(Some(picker.cursor));
-        frame.render_stateful_widget(List::new(items), inner, &mut state);
+        StatefulWidget::render(List::new(items), inner, buf, &mut state);
     }
 }
 
@@ -704,90 +672,53 @@ impl Screen for VariantScreen {
         &self.title
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, _log: &LogTail) {
-        let modal_height: u16 = match &self.modal {
-            VariantModal::Filter(_) => 2,
-            VariantModal::Carrier(_) => 10,
-            _ => 0,
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let error_text = self.error.clone().or_else(|| match &self.modal {
+            VariantModal::Filter(m) => m.parse_error.clone().map(|e| format!("error: {e}")),
+            _ => None,
+        });
+        let error = error_text.map(|text| ErrorMessage { text });
+        let chrome = ScreenChrome {
+            title: &self.title,
+            status: None,
+            error: error.as_ref(),
+            scope: ActionScope::Variant,
+            graph: None,
         };
-        let detail_height: u16 = if area.height >= 24 { 8 } else { 0 };
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(6),
-                Constraint::Length(detail_height),
-                Constraint::Length(modal_height),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-        self.draw_table(frame, v[0]);
-        if detail_height > 0 && matches!(self.modal, VariantModal::None) {
-            self.draw_detail(frame, v[1]);
-        }
-        match &self.modal {
-            VariantModal::Filter(m) => self.draw_filter_bar(frame, v[2], m),
-            VariantModal::Carrier(p) => self.draw_carrier_panel(frame, v[2], p),
-            _ => {}
-        }
-
-        let error_line = self
-            .error
-            .clone()
-            .or_else(|| match &self.modal {
-                VariantModal::Filter(m) => m.parse_error.clone().map(|e| format!("error: {e}")),
-                _ => None,
-            })
-            .unwrap_or_default();
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {error_line}"),
-                Style::default().fg(theme::BAD),
-            ))),
-            v[3],
-        );
-
-        let hint = match &self.modal {
-            VariantModal::None => {
-                "/ filter  ! columns  c carriers  { } page  g G start/end  q back"
+        let modal = &self.modal;
+        let body = |inner: Rect, buf: &mut Buffer| {
+            let modal_height: u16 = match modal {
+                VariantModal::Filter(_) => 2,
+                VariantModal::Carrier(_) => 10,
+                _ => 0,
+            };
+            let detail_height: u16 = if inner.height >= 20 { 8 } else { 0 };
+            let v = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(6),
+                    Constraint::Length(detail_height),
+                    Constraint::Length(modal_height),
+                ])
+                .split(inner);
+            self.draw_table(v[0], buf);
+            if detail_height > 0 && matches!(modal, VariantModal::None) {
+                self.draw_detail(v[1], buf);
             }
-            VariantModal::Filter(_) => "enter apply  esc cancel  ctrl-u clear",
-            VariantModal::Columns(_) => "space toggle  enter close  esc cancel",
-            VariantModal::Carrier(_) => "j k scroll  esc close",
+            match modal {
+                VariantModal::Filter(m) => self.draw_filter_bar(v[2], buf, m),
+                VariantModal::Carrier(p) => self.draw_carrier_panel(v[2], buf, p),
+                _ => {}
+            }
+            if let VariantModal::Columns(p) = modal {
+                self.draw_column_picker(inner, buf, p);
+            }
         };
-        StatusBar { title: &self.title, keys: hint }.render(frame, v[4]);
-
-        if let VariantModal::Columns(p) = &self.modal {
-            self.draw_column_picker(frame, area, p);
-        }
+        Shell::new(chrome, body).render(area, frame.buffer_mut());
     }
 
     fn scope(&self) -> ActionScope {
         ActionScope::Variant
-    }
-
-    fn keys(&self) -> KeyMap {
-        if !matches!(self.modal, VariantModal::None) {
-            return KeyMap::new();
-        }
-        let none = KeyModifiers::NONE;
-        KeyMap::new()
-            .bind(KeyCode::Char('q'), none, Action::VariantClose)
-            .bind(KeyCode::Esc, none, Action::VariantClose)
-            .bind(KeyCode::Char('j'), none, Action::VariantScrollRowDown)
-            .bind(KeyCode::Down, none, Action::VariantScrollRowDown)
-            .bind(KeyCode::Char('k'), none, Action::VariantScrollRowUp)
-            .bind(KeyCode::Up, none, Action::VariantScrollRowUp)
-            .bind(KeyCode::Char('{'), none, Action::VariantPrevRowGroup)
-            .bind(KeyCode::Char('}'), none, Action::VariantNextRowGroup)
-            .bind(KeyCode::Char('g'), none, Action::VariantJumpStart)
-            .bind(KeyCode::Char('G'), KeyModifiers::SHIFT, Action::VariantJumpEnd)
-            .bind(KeyCode::Char('/'), none, Action::VariantOpenFilter)
-            .bind(KeyCode::Char('x'), none, Action::VariantFilterClear)
-            .bind(KeyCode::Char('!'), none, Action::VariantOpenColumnPicker)
-            .bind(KeyCode::Char('c'), none, Action::VariantOpenCarrierView)
-            .bind(KeyCode::Enter, none, Action::VariantOpenLinked)
     }
 
     fn handle(&mut self, event: &AppEvent) -> Transition {
@@ -795,7 +726,7 @@ impl Screen for VariantScreen {
             return Transition::Stay;
         };
         if matches!(self.modal, VariantModal::None) {
-            return match self.keys().lookup(k.code, k.modifiers) {
+            return match KeyMap::for_scope(ActionScope::Variant).lookup(k.code, k.modifiers) {
                 Some(action) => self.on_action(action),
                 None => Transition::Stay,
             };
@@ -805,105 +736,53 @@ impl Screen for VariantScreen {
 
     fn on_action(&mut self, action: Action) -> Transition {
         self.error = None;
-        match action {
-            Action::VariantClose => Transition::Pop,
+        let nav: Result<(), CohortError> = match action {
+            Action::VariantClose => return Transition::Pop,
             Action::VariantScrollRowDown => {
                 self.scroller.scroll_down();
-                Transition::Stay
+                Ok(())
             }
             Action::VariantScrollRowUp => {
                 self.scroller.scroll_up();
-                Transition::Stay
+                Ok(())
             }
-            Action::VariantPrevRowGroup => {
-                if let Err(e) = self.scroller.prev_row_group() {
-                    self.error = Some(format!("{e}"));
-                }
-                Transition::Stay
-            }
-            Action::VariantNextRowGroup => {
-                if let Err(e) = self.scroller.next_row_group() {
-                    self.error = Some(format!("{e}"));
-                }
-                Transition::Stay
-            }
-            Action::VariantJumpStart => {
-                if let Err(e) = self.scroller.goto_row_group(0) {
-                    self.error = Some(format!("{e}"));
-                }
-                Transition::Stay
-            }
+            Action::VariantPrevRowGroup => self.scroller.prev_row_group(),
+            Action::VariantNextRowGroup => self.scroller.next_row_group(),
+            Action::VariantJumpStart => self.scroller.goto_row_group(0),
             Action::VariantJumpEnd => {
                 let last = self.scroller.row_group_count().saturating_sub(1);
-                if let Err(e) = self.scroller.goto_row_group(last) {
-                    self.error = Some(format!("{e}"));
-                }
-                Transition::Stay
+                self.scroller.goto_row_group(last)
             }
             Action::VariantOpenFilter => {
                 self.open_filter();
-                Transition::Stay
+                Ok(())
             }
             Action::VariantFilterClear => {
                 self.clear_filter();
-                Transition::Stay
+                Ok(())
             }
             Action::VariantOpenColumnPicker => {
                 self.open_column_picker();
-                Transition::Stay
+                Ok(())
             }
             Action::VariantOpenCarrierView => {
                 self.open_carrier_view();
-                Transition::Stay
+                Ok(())
             }
-            Action::VariantOpenLinked => {
-                self.try_cross_open();
-                if let ArtifactOutcome::OpenArtifact { path, filter } =
-                    <Self as ArtifactView>::outcome(self)
-                {
-                    let companion = self.companion.clone();
-                    let prefix = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned());
-                    let opened = Self::open(path, prefix.as_deref(), None, companion).and_then(
-                        |s| match filter {
-                            Some(f) => {
-                                let text = match &f.predicate {
-                                    Predicate::Eq(v) => {
-                                        format!("{} = \"{}\"", f.column.as_str(), v)
-                                    }
-                                };
-                                s.with_initial_filter(&text)
-                            }
-                            None => Ok(s),
-                        },
-                    );
-                    match opened {
-                        Ok(screen) => return Transition::Push(Box::new(screen)),
-                        Err(e) => self.error = Some(format!("{e}")),
-                    }
-                }
-                Transition::Stay
-            }
+            Action::VariantOpenLinked => match self.open_companion_for_focused_gene() {
+                Ok(screen) => return Transition::Push(Box::new(screen)),
+                Err(e) => Err(e),
+            },
             Action::VariantCloseCarrierView | Action::VariantColumnPickerClose => {
                 self.close_modal();
-                Transition::Stay
+                Ok(())
             }
-            _ => Transition::Stay,
+            _ => Ok(()),
+        };
+        if let Err(e) = nav {
+            self.error = Some(format!("{e}"));
         }
-    }
-}
-
-impl ArtifactView for VariantScreen {
-    fn header(&self) -> Option<String> {
-        self.summary.clone()
-    }
-
-    fn outcome(&mut self) -> ArtifactOutcome {
-        match self.pending_open.take() {
-            Some((path, filter)) => ArtifactOutcome::OpenArtifact { path, filter },
-            None => ArtifactOutcome::Continue,
-        }
+        Transition::Stay
     }
 }
 
@@ -1100,48 +979,10 @@ fn format_cell(batch: &RecordBatch, col: usize, row: usize) -> String {
     if array.is_null(row) {
         return "·".to_string();
     }
-    match array.data_type() {
-        DataType::Int32 => array
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .map(|a| a.value(row).to_string())
-            .unwrap_or_default(),
-        DataType::Int64 => array
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .map(|a| a.value(row).to_string())
-            .unwrap_or_default(),
-        DataType::UInt32 => array
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .map(|a| a.value(row).to_string())
-            .unwrap_or_default(),
-        DataType::UInt64 => array
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .map(|a| a.value(row).to_string())
-            .unwrap_or_default(),
-        DataType::Float32 => array
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .map(|a| format!("{:.4}", a.value(row)))
-            .unwrap_or_default(),
-        DataType::Float64 => array
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .map(|a| format!("{:.4}", a.value(row)))
-            .unwrap_or_default(),
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .map(|a| a.value(row).to_string())
-            .unwrap_or_default(),
-        DataType::Boolean => array
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .map(|a| if a.value(row) { "true" } else { "false" }.to_string())
-            .unwrap_or_default(),
-        other => format!("{other:?}"),
+    let opts = FormatOptions::default();
+    match ArrayFormatter::try_new(array.as_ref(), &opts) {
+        Ok(f) => f.value(row).to_string(),
+        Err(_) => String::new(),
     }
 }
 

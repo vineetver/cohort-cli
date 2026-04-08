@@ -1,21 +1,21 @@
-#![allow(dead_code, unused_imports)]
-
 pub mod types;
 
 pub mod annotate;
 pub mod ingest;
 pub mod meta_staar;
+pub mod setup;
 pub mod staar;
 
+pub use setup::SetupStage;
 pub use types::{
-    ArtifactKind, FieldData, FieldValue, FormError, FormField, FormSchema, FormValues, PathKind,
-    RunRequest, SessionCtx, StageGroup, StageId,
+    ArtifactKind, FormError, FormSchema, FormValues, RunRequest, SessionCtx, StageId,
 };
+
+pub static SETUP_STAGE: SetupStage = SetupStage;
 
 pub trait Stage: Send + Sync + 'static {
     fn id(&self) -> StageId;
     fn label(&self) -> &'static str;
-    fn group(&self) -> StageGroup;
     fn inputs(&self) -> &'static [ArtifactKind];
     fn outputs(&self) -> &'static [ArtifactKind];
     fn form_schema(&self, ctx: &SessionCtx) -> FormSchema;
@@ -33,3 +33,10 @@ pub const STAGES: &[&dyn Stage] = &[
     &StaarStage,
     &MetaStaarStage,
 ];
+
+pub fn next_for(kind: ArtifactKind) -> Option<&'static dyn Stage> {
+    STAGES
+        .iter()
+        .copied()
+        .find(|s| s.inputs().contains(&kind))
+}

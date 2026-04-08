@@ -7,7 +7,7 @@ use crate::staar::pipeline::StaarConfig;
 
 use super::types::{
     ArtifactKind, FormError, FormField, FormSchema, FormValues, PathKind, RunRequest, SessionCtx,
-    StageGroup, StageId,
+    StageId,
 };
 use super::Stage;
 
@@ -16,8 +16,8 @@ pub struct StaarStage;
 const INPUTS: &[ArtifactKind] = &[ArtifactKind::AnnotatedSet, ArtifactKind::GenotypeStore];
 const OUTPUTS: &[ArtifactKind] = &[ArtifactKind::StaarResults, ArtifactKind::SumStats];
 
-const MASK_OPTIONS: &[&str] = &["coding", "noncoding", "sliding-window", "scang"];
 const MASK_DEFAULT: &[&str] = &["coding"];
+const MASK_OPTIONS: &[&str] = &["coding", "noncoding", "sliding-window", "scang"];
 
 impl Stage for StaarStage {
     fn id(&self) -> StageId {
@@ -26,9 +26,6 @@ impl Stage for StaarStage {
     fn label(&self) -> &'static str {
         "STAAR"
     }
-    fn group(&self) -> StageGroup {
-        StageGroup::Test
-    }
     fn inputs(&self) -> &'static [ArtifactKind] {
         INPUTS
     }
@@ -36,14 +33,15 @@ impl Stage for StaarStage {
         OUTPUTS
     }
 
-    fn form_schema(&self, _ctx: &SessionCtx) -> FormSchema {
+    fn form_schema(&self, ctx: &SessionCtx) -> FormSchema {
+        let focused = ctx.focused.map(|p| p.to_path_buf());
         FormSchema {
             fields: vec![
                 FormField::Path {
                     id: "genotypes",
                     label: "genotypes",
                     kind: PathKind::Any,
-                    default: None,
+                    default: focused.clone(),
                 },
                 FormField::Path {
                     id: "phenotype",

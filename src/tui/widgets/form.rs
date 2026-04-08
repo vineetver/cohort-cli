@@ -52,12 +52,6 @@ impl Form {
             .insert(id, FieldData::Path(FieldValue::Edited(path)));
     }
 
-    pub fn set_text(&mut self, id: &'static str, text: String) {
-        self.values
-            .values
-            .insert(id, FieldData::Text(FieldValue::Edited(text)));
-    }
-
     pub fn set_multi(&mut self, id: &'static str, items: Vec<String>) {
         self.values
             .values
@@ -88,6 +82,14 @@ impl Form {
             Row::Field { field, .. } => Some(field.id()),
             _ => None,
         }
+    }
+
+    pub fn field(&self, id: &str) -> Option<&FormField> {
+        self.schema
+            .fields
+            .iter()
+            .chain(self.schema.advanced.iter())
+            .find(|f| f.id() == id)
     }
 
     pub fn handle(&mut self, code: KeyCode) -> FormOutcome {
