@@ -27,7 +27,7 @@ pub struct MappedBytes {
 }
 
 impl MappedBytes {
-    pub(crate) fn new(inner: Mmap) -> Self {
+    pub fn new(inner: Mmap) -> Self {
         Self { inner }
     }
 }
@@ -45,16 +45,10 @@ impl AsRef<[u8]> for MappedBytes {
     }
 }
 
-pub(crate) trait Backend: Send + Sync {
+pub trait Backend: Send + Sync {
     /// Open a parquet file as a streaming RecordBatch reader.
     fn open_parquet(&self, path: &Path) -> Result<BoxedBatchReader, CohortError>;
 
-    /// Memory-map a binary file (sparse_g.bin, lookup indexes).
+    /// Memory-map a binary file (sparse_g.bin).
     fn mmap(&self, path: &Path) -> Result<MappedBytes, CohortError>;
-
-    /// Atomic write: write to tmp, fsync, rename, fsync parent.
-    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), CohortError>;
-
-    /// Replace a directory atomically by rename.
-    fn swap_dir(&self, staging: &Path, final_path: &Path) -> Result<(), CohortError>;
 }

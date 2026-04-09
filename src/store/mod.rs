@@ -6,10 +6,7 @@ pub mod config;
 pub mod ids;
 pub mod layout;
 pub mod list;
-pub mod lookups;
 pub mod manifest;
-pub mod query;
-pub mod scratch;
 
 use std::fs;
 
@@ -22,14 +19,10 @@ use cache::CacheStore;
 use cohort::{CohortHandle, CohortId};
 use config::StoreConfig;
 use layout::Layout;
-use scratch::ScratchPool;
-
-const DEFAULT_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 pub struct Store {
     layout: Layout,
     backend: Box<dyn Backend>,
-    scratch: ScratchPool,
 }
 
 impl Store {
@@ -49,21 +42,11 @@ impl Store {
         Ok(Self {
             layout,
             backend: Box::new(LocalFs::new()),
-            scratch: ScratchPool::new(DEFAULT_SCRATCH_BUDGET_BYTES),
         })
-    }
-
-    pub fn layout(&self) -> &Layout {
-        &self.layout
     }
 
     pub(crate) fn backend(&self) -> &dyn Backend {
         &*self.backend
-    }
-
-    #[allow(dead_code)]
-    pub fn scratch(&self) -> &ScratchPool {
-        &self.scratch
     }
 
     /// Open a cohort handle by id. Lazy: does not read the manifest until
@@ -87,30 +70,15 @@ impl Store {
         AnnotationRegistry::load(refs_path, config)
     }
 
-    /// Cache subsystem — score caches and (Phase 7) lookup indexes
-    /// keyed by cohort id.
+    /// Cache subsystem — score caches keyed by cohort id.
     pub fn cache(&self) -> CacheStore<'_> {
         CacheStore::new(&self.layout)
-    }
-
-    /// Resolve a registered lookup against a cohort. Builds the
-    /// on-disk index lazily on the first call; subsequent calls reuse
-    /// the cached file.
-    pub fn lookup<L: lookups::Lookup>(
-        &self,
-        lookup: &L,
-        cohort: &CohortHandle<'_>,
-        key: &L::Key,
-    ) -> Result<L::Value, CohortError> {
-        let dir = lookups::ensure_built(lookup, cohort)?;
-        lookup.query(cohort, &dir, key)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
     #[test]
     fn open_creates_root_and_subdirs() {
@@ -118,31 +86,9 @@ mod tests {
         let root = tmp.path().join("store_root");
         let store = Store::open(StoreConfig { root: root.clone() }).unwrap();
         assert!(root.is_dir());
-        assert!(store.layout().cohorts_root().is_dir());
-        assert!(store.layout().lists_root().is_dir());
-        assert!(store.layout().cache_root().is_dir());
-    }
-
-    #[test]
-    fn backend_write_atomic_round_trips() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("store_root");
-        let store = Store::open(StoreConfig { root: root.clone() }).unwrap();
-
-        let sentinel = root.join("sentinel.bin");
-        store
-            .backend()
-            .write_atomic(&sentinel, b"phase-1-sentinel")
-            .unwrap();
-
-        let reopened = Store::open(StoreConfig { root: root.clone() }).unwrap();
-        let mut bytes = Vec::new();
-        std::fs::File::open(&sentinel)
-            .unwrap()
-            .read_to_end(&mut bytes)
-            .unwrap();
-        assert_eq!(bytes, b"phase-1-sentinel");
-        let _ = reopened;
+        assert!(store.layout.cohorts_root().is_dir());
+        assert!(store.layout.lists_root().is_dir());
+        assert!(store.layout.cache_root().is_dir());
     }
 
     #[test]

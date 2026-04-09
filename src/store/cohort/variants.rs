@@ -8,10 +8,10 @@
 //! consumed by scoring kernels.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::Path;
 
 use crate::error::CohortError;
+use crate::store::backend::{Backend, BoxedBatchReader};
 use crate::types::{
     AnnotatedVariant, AnnotationWeights, Chromosome, Consequence, FunctionalAnnotation, RegionType,
     RegulatoryFlags,
@@ -57,16 +57,9 @@ pub struct WeightVector {
 }
 
 /// One variant's metadata as loaded from variants.parquet.
-///
-/// `end_position` is the inclusive 1-based last base covered by the
-/// variant's reference allele: `position + max(ref.len(), 1) - 1`.
-/// Derived at load time, not stored, so old cohorts continue to work
-/// without a schema bump. SVs with explicit END annotations will need
-/// a schema column when they land.
 #[derive(Clone, Debug)]
 pub struct VariantIndexEntry {
     pub position: u32,
-    pub end_position: u32,
     pub ref_allele: Box<str>,
     pub alt_allele: Box<str>,
     pub vid: Box<str>,
@@ -129,9 +122,10 @@ pub struct VariantIndex {
 
 impl VariantIndex {
     /// Load from variants.parquet + membership.parquet in a chromosome directory.
-    pub fn load(chrom_dir: &Path) -> Result<Self, CohortError> {
-        let entries = load_variant_entries(chrom_dir)?;
-        let gene_variants = super::membership::load(chrom_dir)?;
+    pub fn load(backend: &dyn Backend, chrom_dir: &Path) -> Result<Self, CohortError> {
+        let variants_reader = backend.open_parquet(&chrom_dir.join("variants.parquet"))?;
+        let entries = load_variant_entries(variants_reader)?;
+        let gene_variants = super::membership::load(backend, chrom_dir)?;
 
         let vid_to_vcf: HashMap<Box<str>, u32> = entries
             .iter()
@@ -243,16 +237,8 @@ impl VariantIndex {
     }
 }
 
-fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, CohortError> {
+fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntry>, CohortError> {
     use arrow::array::{BooleanArray, Float64Array, Int32Array, StringArray, UInt32Array};
-
-    let pq_path = chrom_dir.join("variants.parquet");
-    let file = File::open(&pq_path)
-        .map_err(|e| CohortError::Resource(format!("Open {}: {e}", pq_path.display())))?;
-    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| CohortError::Resource(format!("Parquet open: {e}")))?
-        .build()
-        .map_err(|e| CohortError::Resource(format!("Parquet reader: {e}")))?;
 
     let mut entries = Vec::new();
 
@@ -355,10 +341,8 @@ fn load_variant_entries(chrom_dir: &Path) -> Result<Vec<VariantIndexEntry>, Coho
 
             let position = pos_arr.value(i) as u32;
             let ref_str = ref_arr.value(i);
-            let end_position = position + ref_str.len().max(1) as u32 - 1;
             entries.push(VariantIndexEntry {
                 position,
-                end_position,
                 ref_allele: ref_str.into(),
                 alt_allele: alt_arr.value(i).into(),
                 vid: vid_arr.value(i).into(),
@@ -391,7 +375,6 @@ mod tests {
         let entries = vec![
             VariantIndexEntry {
                 position: 100,
-                end_position: 100,
                 ref_allele: "A".into(),
                 alt_allele: "T".into(),
                 vid: "22-100-A-T".into(),
@@ -405,7 +388,6 @@ mod tests {
             },
             VariantIndexEntry {
                 position: 200,
-                end_position: 200,
                 ref_allele: "C".into(),
                 alt_allele: "G".into(),
                 vid: "22-200-C-G".into(),
@@ -419,7 +401,6 @@ mod tests {
             },
             VariantIndexEntry {
                 position: 300,
-                end_position: 300,
                 ref_allele: "G".into(),
                 alt_allele: "A".into(),
                 vid: "22-300-G-A".into(),

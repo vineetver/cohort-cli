@@ -12,14 +12,13 @@
 //! alias appears in both.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Tier};
 use crate::error::CohortError;
 use crate::store::annotation::{AnnotationDb, TissueDb};
-use crate::store::manifest::write_atomic;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -45,7 +44,6 @@ struct RefsFile {
 }
 
 pub struct AnnotationRegistry {
-    refs_path: PathBuf,
     entries: BTreeMap<String, AnnotationRef>,
 }
 
@@ -69,18 +67,7 @@ impl AnnotationRegistry {
                 entries.insert(entry.name.clone(), entry);
             }
         }
-        Ok(Self {
-            refs_path,
-            entries,
-        })
-    }
-
-    pub fn get(&self, name: &str) -> Option<&AnnotationRef> {
-        self.entries.get(name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys().map(|s| s.as_str())
+        Ok(Self { entries })
     }
 
     /// Open the FAVOR-style annotation DB at `name`. Errors if the
@@ -112,37 +99,6 @@ impl AnnotationRegistry {
                 "annotation ref {name} is a favor ref; use open_db"
             ))),
         }
-    }
-
-    /// Add or replace an entry, then persist `refs.toml` atomically.
-    /// Default entries (those derived from `Config`) are not stored on
-    /// disk; only `attach`'d entries appear in the file so a fresh
-    /// install picks up new defaults transparently.
-    pub fn attach(
-        &mut self,
-        name: String,
-        kind: AnnotationKind,
-        path: PathBuf,
-    ) -> Result<(), CohortError> {
-        let entry = AnnotationRef {
-            name: name.clone(),
-            kind,
-            path,
-        };
-        self.entries.insert(name, entry);
-        self.persist()
-    }
-
-    fn persist(&self) -> Result<(), CohortError> {
-        let user_refs: Vec<AnnotationRef> = self
-            .entries
-            .values()
-            .filter(|r| !is_default_alias(&r.name))
-            .cloned()
-            .collect();
-        let body = toml::to_string_pretty(&RefsFile { refs: user_refs })
-            .map_err(|e| CohortError::Resource(format!("serialize refs.toml: {e}")))?;
-        write_atomic(&self.refs_path, body.as_bytes())
     }
 
     fn require(&self, name: &str) -> Result<&AnnotationRef, CohortError> {
@@ -182,13 +138,6 @@ fn default_entries(config: &Config) -> Vec<AnnotationRef> {
     out
 }
 
-/// Default aliases are stable names the registry always seeds from the
-/// `Config`; they should never be persisted into refs.toml because the
-/// disk file would shadow user changes to the `Config`.
-fn is_default_alias(name: &str) -> bool {
-    matches!(name, "favor-base" | "favor-full" | "favor-tissue")
-}
-
 /// Convenience: pick the default alias for a tier.
 pub fn favor_alias_for(tier: Tier) -> &'static str {
     match tier {
@@ -197,63 +146,3 @@ pub fn favor_alias_for(tier: Tier) -> &'static str {
     }
 }
 
-/// Convenience: open the FAVOR DB for `tier` from the standard
-/// configured root, bypassing the registry. Used by command sites that
-/// take a `Tier` directly (`commands/annotate`, `commands/inspect`).
-pub fn open_favor_tier(
-    config: &Config,
-    refs_path: &Path,
-    tier: Tier,
-) -> Result<AnnotationDb, CohortError> {
-    let registry = AnnotationRegistry::load(refs_path.to_path_buf(), config)?;
-    registry.open_db(favor_alias_for(tier))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::DataConfig;
-
-    fn test_config(root: &Path) -> Config {
-        let mut c = Config::default();
-        c.data = DataConfig {
-            root_dir: root.to_string_lossy().into_owned(),
-            tier: Tier::Base,
-            packs: Vec::new(),
-        };
-        c
-    }
-
-    #[test]
-    fn defaults_seed_from_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = test_config(dir.path());
-        let registry = AnnotationRegistry::load(dir.path().join("refs.toml"), &cfg).unwrap();
-        assert!(registry.get("favor-base").is_some());
-        assert!(registry.get("favor-full").is_some());
-        assert!(registry.get("favor-tissue").is_some());
-    }
-
-    #[test]
-    fn attach_persists_only_user_refs() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = test_config(dir.path());
-        let refs_path = dir.path().join("refs.toml");
-        let mut registry = AnnotationRegistry::load(refs_path.clone(), &cfg).unwrap();
-        registry
-            .attach(
-                "ukb-v3".into(),
-                AnnotationKind::Favor { tier: Tier::Full },
-                dir.path().join("ukb_v3"),
-            )
-            .unwrap();
-
-        let body = std::fs::read_to_string(&refs_path).unwrap();
-        assert!(body.contains("ukb-v3"));
-        assert!(!body.contains("favor-base"));
-
-        let reloaded = AnnotationRegistry::load(refs_path, &cfg).unwrap();
-        assert!(reloaded.get("ukb-v3").is_some());
-        assert!(reloaded.get("favor-base").is_some());
-    }
-}

@@ -21,12 +21,9 @@ pub mod handle;
 pub mod membership;
 pub mod sparse_g;
 pub mod types;
-pub mod validate;
 pub mod variants;
 
 pub use handle::{BuildOpts, ChromosomeView, CohortHandle, CohortSources};
-#[allow(unused_imports)]
-pub use types::{CarrierBatch, SampleIdx, SortedVcfs, VariantMetadata, VariantRow, VariantVcf};
 
 pub use crate::store::ids::CohortId;
 

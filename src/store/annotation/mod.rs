@@ -5,11 +5,11 @@
 
 pub mod refs;
 
-pub use refs::{open_favor_tier, AnnotationKind, AnnotationRef, AnnotationRegistry};
+pub use refs::AnnotationRegistry;
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, Tier};
+use crate::config::Tier;
 use crate::error::CohortError;
 
 pub struct AnnotationDb {
@@ -18,10 +18,6 @@ pub struct AnnotationDb {
 }
 
 impl AnnotationDb {
-    pub fn open(config: &Config) -> Result<Self, CohortError> {
-        Self::open_tier(config.data.tier, &config.root_dir())
-    }
-
     pub fn open_tier(tier: Tier, data_root: &Path) -> Result<Self, CohortError> {
         let root = data_root.join(tier.as_str());
         if !root.exists() {

@@ -18,6 +18,7 @@ use ratatui::Frame;
 
 use crate::column::Col;
 use crate::error::CohortError;
+use crate::store::backend::LocalFs;
 use crate::store::cohort::sparse_g::SparseG;
 use crate::store::cohort::variants::{CarrierList, VariantIndex};
 use crate::tui::action::{Action, ActionScope};
@@ -366,8 +367,9 @@ fn load_carriers(
         )));
     }
     if !view.chrom_cache.contains_key(chrom) {
-        let sparse_g = SparseG::open(&chrom_dir)?;
-        let index = VariantIndex::load(&chrom_dir)?;
+        let backend = LocalFs::new();
+        let sparse_g = SparseG::open(&backend, &chrom_dir)?;
+        let index = VariantIndex::load(&backend, &chrom_dir)?;
         view.chrom_cache
             .insert(chrom.to_string(), ChromCacheEntry { sparse_g, index });
     }

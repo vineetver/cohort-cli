@@ -8,24 +8,19 @@
 //! All queries (region, gene, MAF, annotation) resolve to variant_vcf masks
 //! externally. SparseG only knows about (sample_id, variant_vcf) → dosage.
 
-use std::fs::File;
 use std::path::Path;
-
-use memmap2::Mmap;
 
 use super::encoding::*;
 use super::variants::{CarrierEntry, CarrierList};
 use crate::error::CohortError;
+use crate::store::backend::{Backend, MappedBytes};
 
 /// Memory-mapped sparse genotype matrix for one chromosome.
 ///
 /// Indexed by variant_vcf. No gene concept — just (sample_id, variant_vcf) → dosage.
 /// variant_vcf is a dense, immutable index over the variant universe for this chromosome.
-#[allow(dead_code)]
 pub struct SparseG {
-    mmap: Mmap,
-    n_samples: u32,
-    n_variants: u32,
+    mmap: MappedBytes,
     wide: bool,
     /// Byte offset of each variant's carrier data relative to SPARSE_G_HEADER_SIZE.
     /// offsets[variant_vcf] = byte position of that variant's carrier block.
@@ -33,16 +28,17 @@ pub struct SparseG {
 }
 
 impl SparseG {
-    /// Open a sparse genotype matrix for one chromosome.
-    pub fn open(chrom_dir: &Path) -> Result<Self, CohortError> {
+    /// Open a sparse genotype matrix for one chromosome via a backend.
+    pub fn open(backend: &dyn Backend, chrom_dir: &Path) -> Result<Self, CohortError> {
         let path = chrom_dir.join("sparse_g.bin");
-        let file = File::open(&path)
-            .map_err(|e| CohortError::Resource(format!("Open {}: {e}", path.display())))?;
-        let mmap = unsafe {
-            Mmap::map(&file)
-                .map_err(|e| CohortError::Resource(format!("mmap {}: {e}", path.display())))?
-        };
+        let mmap = backend.mmap(&path)?;
+        Self::from_mmap(mmap)
+    }
 
+    /// Parse the sparse genotype matrix from an already-mapped byte region.
+    /// Used by `open` and by any caller that has already acquired bytes via
+    /// a `Backend` (e.g. a future remote backend that materialises locally).
+    pub fn from_mmap(mmap: MappedBytes) -> Result<Self, CohortError> {
         let header = SparseGHeader::read_from(&mmap)
             .map_err(|e| CohortError::Resource(format!("sparse_g.bin: {e}")))?;
 
@@ -66,36 +62,9 @@ impl SparseG {
 
         Ok(Self {
             mmap,
-            n_samples: header.n_samples,
-            n_variants: header.n_variants,
             wide: header.wide_index(),
             offsets,
         })
-    }
-
-    pub fn n_samples(&self) -> u32 {
-        self.n_samples
-    }
-
-    pub fn n_variants(&self) -> u32 {
-        self.n_variants
-    }
-
-    /// Raw offsets table. offsets[v] = byte offset of variant v's carrier data
-    /// relative to SPARSE_G_HEADER_SIZE.
-    #[allow(dead_code)]
-    pub fn offsets(&self) -> &[u64] {
-        &self.offsets
-    }
-
-    /// Carrier-data region size in bytes (header to start of offsets table).
-    #[allow(dead_code)]
-    pub fn carrier_data_size(&self) -> u64 {
-        if self.offsets.is_empty() {
-            return 0;
-        }
-        let offsets_start_in_file = self.mmap.len() - self.offsets.len() * 8;
-        (offsets_start_in_file - SPARSE_G_HEADER_SIZE) as u64
     }
 
     /// O(1) access: load carrier list for one variant by variant_vcf.
