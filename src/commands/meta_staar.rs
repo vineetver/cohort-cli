@@ -189,7 +189,7 @@ fn run_all_chromosomes(
                 if let Some(existing) = all_results.iter_mut().find(|(mt, _)| mt == mask_type) {
                     existing.1.extend(results);
                 } else {
-                    all_results.push((mask_type.clone(), results));
+                    all_results.push((*mask_type, results));
                 }
             }
         }

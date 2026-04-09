@@ -1240,7 +1240,8 @@ mod tests {
         }
     }
 
-    fn fixture(m: usize, n: usize) -> (Mat<f64>, Mat<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<u32>) {
+    type Fixture = (Mat<f64>, Mat<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<u32>);
+    fn fixture(m: usize, n: usize) -> Fixture {
         let u = Mat::<f64>::from_fn(m, 1, |i, _| 0.3 * (i as f64 + 1.0));
         // Diagonal-dominant ⇒ PSD by construction.
         let mut k = Mat::<f64>::zeros(m, m);
