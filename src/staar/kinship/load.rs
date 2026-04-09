@@ -90,8 +90,8 @@ fn parse_kinship_triplets(
     // Default-fill any diagonal the TSV didn't set. Matches the old
     // dense loader which pre-zeroed then wrote 1.0 on every diagonal
     // before parsing the file.
-    for i in 0..n {
-        if !diagonal_set[i] {
+    for (i, &set) in diagonal_set.iter().enumerate() {
+        if !set {
             triplets.push(Triplet::new(i as u32, i as u32, 1.0));
         }
     }
