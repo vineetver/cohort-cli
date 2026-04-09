@@ -1,17 +1,10 @@
 //! Canonical object model for COHORT.
-//!
-//! One struct per concept. Downstream code composes these types — no parallel
-//! structs, no field duplication, no `Vec<f64>` where `[f64; 11]` suffices.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// Strongly-typed chromosome identifier.
-///
-/// `Ord` gives natural sort order: 1..22 < X < Y < MT.
-/// Replaces all string-based chromosome fields and `chrom_sort_key()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Chromosome {
     Autosome(u8), // 1–22
@@ -44,7 +37,6 @@ impl Ord for Chromosome {
 }
 
 impl Chromosome {
-    /// Bare label without "chr" prefix — matches parquet conventions.
     pub fn label(&self) -> String {
         match self {
             Chromosome::Autosome(n) => n.to_string(),
@@ -69,8 +61,6 @@ impl fmt::Display for Chromosome {
 impl FromStr for Chromosome {
     type Err = String;
 
-    /// Parse chromosome from common representations:
-    /// "chr1", "1", "chrX", "X", "chrM", "MT", "chrMT", etc.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = s.strip_prefix("chr").unwrap_or(s);
         match raw {
@@ -104,10 +94,6 @@ impl<'de> Deserialize<'de> for Chromosome {
     }
 }
 
-/// Fixed-size annotation weights for the 11 STAAR channels.
-///
-/// Replaces `Vec<f64>` annotation_weights, `WEIGHT_COL_START` / `WEIGHT_COL_COUNT`
-/// magic constants, and `ANNOTATION_CHANNELS` (now `DISPLAY_NAMES`).
 #[derive(Clone, Copy, Debug)]
 pub struct AnnotationWeights(pub [f64; 11]);
 
@@ -118,9 +104,6 @@ impl Default for AnnotationWeights {
 }
 
 impl AnnotationWeights {
-    /// Column names as written to parquet.
-    /// Canonical source of truth is now `column::STAAR_WEIGHTS` — these
-    /// constants are retained for backward-compat tests only.
     #[cfg(test)]
     pub const NAMES: [&str; 11] = [
         "w_cadd",
@@ -136,7 +119,6 @@ impl AnnotationWeights {
         "w_apc_tf",
     ];
 
-    /// Display names matching STAARpipeline R output.
     #[cfg(test)]
     pub const DISPLAY_NAMES: [&str; 11] = [
         "cadd_phred",
@@ -153,9 +135,6 @@ impl AnnotationWeights {
     ];
 }
 
-/// Strongly-typed GENCODE region type. Eliminates per-variant String allocations
-/// and replaces `.contains()` string matching in mask predicates with integer
-/// comparisons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RegionType {

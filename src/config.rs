@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::column::Col;
 use crate::error::CohortError;
 
-/// Annotation tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
@@ -15,7 +14,6 @@ pub enum Tier {
     Full,
 }
 
-/// Deployment environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
@@ -23,7 +21,6 @@ pub enum Environment {
     Workstation,
 }
 
-/// Pipeline columns available from base-tier annotations.
 const BASE_TIER_COLS: &[Col] = &[
     Col::Chromosome,
     Col::Position,
@@ -38,7 +35,6 @@ const BASE_TIER_COLS: &[Col] = &[
     Col::IsCcreEnhancer,
 ];
 
-/// Pipeline columns available from full-tier annotations.
 const FULL_TIER_COLS: &[Col] = &[
     Col::Chromosome,
     Col::Position,
@@ -82,7 +78,6 @@ impl Tier {
         }
     }
 
-    /// Pipeline columns guaranteed present after annotating with this tier.
     pub fn columns(self) -> &'static [Col] {
         match self {
             Tier::Base => BASE_TIER_COLS,
@@ -90,12 +85,10 @@ impl Tier {
         }
     }
 
-    /// Does this tier provide a specific pipeline column?
     pub fn has(self, col: Col) -> bool {
         self.columns().contains(&col)
     }
 
-    /// What tier is required to produce all of the given columns?
     pub fn required_for(cols: &[Col]) -> Tier {
         if cols.iter().all(|c| Tier::Base.has(*c)) {
             Tier::Base
@@ -104,7 +97,6 @@ impl Tier {
         }
     }
 
-    /// Top-level struct columns present in this tier's annotation parquets.
     #[allow(dead_code)]
     pub fn source_columns(self) -> &'static [&'static str] {
         match self {
@@ -122,7 +114,6 @@ impl Tier {
         }
     }
 
-    /// Does this tier's annotation parquet include a given source column?
     #[allow(dead_code)]
     pub fn has_source(self, col: &str) -> bool {
         self.source_columns().contains(&col)
@@ -186,9 +177,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataConfig {
     pub tier: Tier,
-    /// Single root directory — everything derives from this
     pub root_dir: String,
-    /// Installed add-on pack IDs
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packs: Vec<String>,
 }
@@ -206,8 +195,6 @@ pub struct ResourceConfig {
 }
 
 impl ResourceConfig {
-    /// Parse a memory string like "16GB", "16G", "16gb", "16384MB", "16384M"
-    /// into bytes. Returns None if the string is empty or unparseable.
     pub fn parse_memory_bytes(s: &str) -> Option<u64> {
         let s = s.trim();
         if s.is_empty() {
@@ -228,7 +215,6 @@ impl ResourceConfig {
         } else if let Some(n) = s_upper.strip_suffix('M') {
             (n, 1024u64 * 1024)
         } else {
-            // Assume bytes if no suffix
             return s.parse::<u64>().ok();
         };
 
@@ -256,10 +242,6 @@ impl Config {
 
     pub fn config_path() -> PathBuf {
         Self::config_dir().join("config.toml")
-    }
-
-    pub fn default_root_dir() -> PathBuf {
-        Self::config_dir().join("data")
     }
 
     /// Root directory for all FAVOR data
@@ -366,8 +348,6 @@ pub struct DirProbe {
     pub base_chroms: usize,
     pub full_chroms: usize,
     pub tissue_tables: Vec<String>,
-    pub rollups_found: bool,
-    pub reference_found: bool,
 }
 
 impl DirProbe {
@@ -395,98 +375,12 @@ impl DirProbe {
             Vec::new()
         };
 
-        let rollups_found = root.join("rollups").is_dir();
-        let reference_found = tissue_dir.join("reference").is_dir();
-
         Self {
             base_chroms,
             full_chroms,
             tissue_tables,
-            rollups_found,
-            reference_found,
         }
     }
-
-    pub fn has_any_data(&self) -> bool {
-        self.base_chroms > 0
-            || self.full_chroms > 0
-            || !self.tissue_tables.is_empty()
-            || self.rollups_found
-    }
-
-    /// Best tier detected, if any annotations exist
-    pub fn detected_tier(&self) -> Option<Tier> {
-        if self.full_chroms > 0 {
-            Some(Tier::Full)
-        } else if self.base_chroms > 0 {
-            Some(Tier::Base)
-        } else {
-            None
-        }
-    }
-
-    /// Summary lines for display in TUI
-    pub fn summary_lines(&self) -> Vec<(String, ProbeStatus)> {
-        let mut lines = Vec::new();
-
-        // Annotations
-        if self.full_chroms == 24 {
-            lines.push(("full: 24/24 chromosomes".into(), ProbeStatus::Good));
-        } else if self.full_chroms > 0 {
-            lines.push((
-                format!("full: {}/24 chromosomes", self.full_chroms),
-                ProbeStatus::Partial,
-            ));
-        }
-        if self.base_chroms == 24 {
-            lines.push(("base: 24/24 chromosomes".into(), ProbeStatus::Good));
-        } else if self.base_chroms > 0 {
-            lines.push((
-                format!("base: {}/24 chromosomes", self.base_chroms),
-                ProbeStatus::Partial,
-            ));
-        }
-        if self.full_chroms == 0 && self.base_chroms == 0 {
-            lines.push(("annotations: not found".into(), ProbeStatus::Missing));
-        }
-
-        // Tissue packs
-        if !self.tissue_tables.is_empty() {
-            lines.push((
-                format!("tissue: {} tables", self.tissue_tables.len()),
-                ProbeStatus::Good,
-            ));
-        } else {
-            lines.push(("tissue: not found".into(), ProbeStatus::Missing));
-        }
-
-        // Rollups
-        if self.rollups_found {
-            lines.push(("rollups: found".into(), ProbeStatus::Good));
-        }
-
-        // Reference
-        if self.reference_found {
-            lines.push(("reference: found".into(), ProbeStatus::Good));
-        }
-
-        if !self.has_any_data() {
-            lines.push((
-                "(data will be downloaded after setup)".into(),
-                ProbeStatus::Info,
-            ));
-        }
-
-        lines
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeStatus {
-    Good,
-    Partial,
-    Missing,
-    Info,
 }
 
 impl Default for Config {

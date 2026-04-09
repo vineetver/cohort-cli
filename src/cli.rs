@@ -54,13 +54,26 @@ pub enum Command {
         force: bool,
     },
 
-    /// Interactive setup wizard - configure data tier, paths, resources
+    /// Configure data tier, paths, resources. Flag-driven; the previous
+    /// interactive TUI wizard has been removed.
     Setup {
-        /// Environment type (for machine mode): hpc or workstation
+        /// Annotation root directory (where FAVOR / tissue data lives)
+        #[arg(long)]
+        root: PathBuf,
+
+        /// Annotation tier: base or full
+        #[arg(long)]
+        tier: String,
+
+        /// Comma-separated optional pack ids to install
+        #[arg(long, value_delimiter = ',')]
+        packs: Vec<String>,
+
+        /// Environment type: hpc or workstation
         #[arg(long)]
         environment: Option<String>,
 
-        /// Default memory budget (for machine mode): e.g. 16GB, 64GB
+        /// Default memory budget: e.g. 16GB, 64GB
         #[arg(long)]
         memory_budget: Option<String>,
     },
@@ -71,13 +84,17 @@ pub enum Command {
         action: DataAction,
     },
 
-    /// Ingest variants: auto-detect format, normalize, output parquet
+    /// Ingest variants: auto-detect format, normalize, output parquet.
+    /// For a multi-sample VCF (biobank dosages, e.g. UKB/TOPMed/All of Us)
+    /// pass `--annotations <annotated-set>` and the cohort genotype store is
+    /// built under `.cohort/cohorts/<id>/` instead of a variant-only set.
     Ingest {
         /// Input file(s) or directory (VCF, TSV, CSV, parquet)
         #[arg(required = true, num_args = 1..)]
         inputs: Vec<PathBuf>,
 
-        /// Output directory [default: <input_stem>.ingested/]
+        /// Output directory [default: <input_stem>.ingested/].
+        /// Ignored for multi-sample VCFs (cohort path uses `.cohort/cohorts/<id>/`).
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -88,6 +105,20 @@ pub enum Command {
         /// Genome build of input: hg38 or hg19 [default: auto-detect]
         #[arg(long)]
         build: Option<GenomeBuild>,
+
+        /// Annotated variant set from `cohort annotate` (required for
+        /// multi-sample VCF input — provides STAAR weights + gene assignments)
+        #[arg(long)]
+        annotations: Option<PathBuf>,
+
+        /// Cohort id under `.cohort/cohorts/` (multi-sample VCF only).
+        /// Defaults to the VCF stem.
+        #[arg(long)]
+        cohort_id: Option<String>,
+
+        /// Force rebuild of the cohort store even if a valid one exists
+        #[arg(long)]
+        rebuild: bool,
     },
 
     /// Annotate variants against FAVOR base or full tier
@@ -138,9 +169,15 @@ pub enum Command {
 
     /// STAAR rare variant association testing
     Staar {
-        /// Multi-sample VCF with genotypes (.vcf or .vcf.gz)
+        /// Multi-sample VCF with genotypes (.vcf or .vcf.gz). Required unless
+        /// `--cohort <id>` is given to load a pre-built cohort store.
         #[arg(long)]
-        genotypes: PathBuf,
+        genotypes: Option<PathBuf>,
+
+        /// Pre-built cohort id (from `cohort ingest <vcf> --annotations ... --cohort-id <id>`).
+        /// Skips probe + rebuild — trusts the manifest at `.cohort/cohorts/<id>/`.
+        #[arg(long)]
+        cohort: Option<String>,
 
         /// Phenotype file (TSV with sample_id as first column)
         #[arg(long)]

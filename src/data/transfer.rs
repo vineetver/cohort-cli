@@ -22,11 +22,8 @@ const CHROMOSOMES: &[&str] = &[
 
 const MAX_RETRIES: u32 = 3;
 
-/// The manifest schema version this CLI understands.
-/// Manifests with a higher version are rejected.
 pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
-/// Map a tier to its MinIO path.
 fn remote_tier_path(tier: Tier) -> &'static str {
     match tier {
         Tier::Full => "stage16/v2",
@@ -46,7 +43,6 @@ pub fn human_size(bytes: u64) -> String {
     format!("{size:.1} PiB")
 }
 
-/// A single file entry in a pack manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub size: u64,
@@ -54,8 +50,6 @@ pub struct FileEntry {
     pub sha256: Option<String>,
 }
 
-/// Pack manifest (v2 canonical format).
-/// The CLI also accepts v1 manifests (files as bare u64 sizes) via `parse_pack_manifest`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PackManifest {
     pub schema_version: u32,
@@ -75,7 +69,6 @@ struct PackManifestV1 {
     files: HashMap<String, u64>,
 }
 
-/// Parse a manifest body, handling both v1 (files as u64) and v2 (files as FileEntry).
 fn parse_pack_manifest(body: &str) -> Result<PackManifest, CohortError> {
     let raw: Value = serde_json::from_str(body)
         .map_err(|e| CohortError::Resource(format!("Invalid manifest JSON: {e}")))?;
@@ -93,20 +86,18 @@ fn parse_pack_manifest(body: &str) -> Result<PackManifest, CohortError> {
     }
 
     if schema_version >= 2 {
-        // v2: files are {size, sha256}
         let manifest: PackManifest = serde_json::from_str(body)
             .map_err(|e| CohortError::Resource(format!("Invalid v2 manifest: {e}")))?;
         return Ok(manifest);
     }
 
-    // v1: files are bare u64 sizes
     let v1: PackManifestV1 = serde_json::from_str(body)
         .map_err(|e| CohortError::Resource(format!("Invalid v1 manifest: {e}")))?;
     Ok(PackManifest {
         schema_version: 1,
         pack_id: v1.pack_id,
         version: v1.version,
-        base_dir: String::new(), // v1 didn't have this
+        base_dir: String::new(),
         total_size: v1.total_size,
         files: v1
             .files

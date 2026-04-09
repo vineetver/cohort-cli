@@ -10,7 +10,9 @@ use crate::ingest::format::FormatRegistry;
 use crate::ingest::{self, BuildGuess, InputFormat};
 use crate::output::{bail_if_cancelled, Output};
 use crate::runtime::Engine;
-use crate::store::list::{VariantSetKind, VariantSetWriter};
+use crate::staar::genotype::read_sample_names;
+use crate::store::cohort::{BuildOpts, CohortId, CohortSources, ProbeReason, StoreProbe};
+use crate::store::list::{VariantSet, VariantSetKind, VariantSetWriter};
 
 fn resolve_inputs(raw: Vec<PathBuf>) -> Result<Vec<PathBuf>, CohortError> {
     let mut resolved = Vec::new();
@@ -65,6 +67,9 @@ pub fn build_config(
     output: Option<PathBuf>,
     emit_sql: bool,
     build_override: Option<GenomeBuild>,
+    annotations: Option<PathBuf>,
+    cohort_id: Option<String>,
+    rebuild: bool,
 ) -> Result<IngestConfig, CohortError> {
     let inputs = resolve_inputs(raw_inputs)?;
 
@@ -92,6 +97,9 @@ pub fn build_config(
         output: output_path,
         emit_sql,
         build_override,
+        annotations,
+        cohort_id,
+        rebuild,
     })
 }
 
@@ -112,12 +120,127 @@ pub fn run_ingest(
     }
 
     if analysis.format == InputFormat::Vcf {
+        if config.inputs.len() == 1 {
+            let n_samples = read_sample_names(first)?.len();
+            if n_samples > 0 {
+                return run_cohort_build(engine, config, n_samples, out);
+            }
+        }
         return ingest_vcf(engine, config, out);
     }
     if config.emit_sql || analysis.needs_intervention() {
         return emit_sql_script(config, &analysis, out);
     }
     ingest_tabular(engine, config, &analysis, out)
+}
+
+fn run_cohort_build(
+    engine: &Engine,
+    config: &IngestConfig,
+    n_samples: usize,
+    out: &dyn Output,
+) -> Result<(), CohortError> {
+    let vcf_path = &config.inputs[0];
+    let annotations_path = config.annotations.as_ref().ok_or_else(|| {
+        CohortError::Input(format!(
+            "Multi-sample VCF detected ({n_samples} samples in {}). \
+             `cohort ingest` needs an annotated variant set for the genotype \
+             store build:\n\
+             \n\
+             1. cohort ingest <vcf> --output variants.set    (sites only — drops genotypes)\n\
+             2. cohort annotate variants.set --full\n\
+             3. cohort ingest <vcf> --annotations variants.set.annotated --cohort-id <id>",
+            vcf_path.display()
+        ))
+    })?;
+    if !annotations_path.exists() {
+        return Err(CohortError::Input(format!(
+            "Annotations not found at '{}'",
+            annotations_path.display()
+        )));
+    }
+    let ann_vs = VariantSet::open(annotations_path)?;
+    ann_vs.require_annotated()?;
+    drop(ann_vs);
+
+    let cohort_id = CohortId::new(
+        config
+            .cohort_id
+            .clone()
+            .unwrap_or_else(|| commands::derive_cohort_id(vcf_path)),
+    );
+
+    let cohort = engine.cohort(&cohort_id);
+    let probe = if config.rebuild {
+        if let Err(e) = engine.store().cache().prune_cohort(&cohort_id) {
+            out.warn(&format!("  prune cache before rebuild: {e}"));
+        }
+        StoreProbe {
+            store_dir: cohort.dir().to_path_buf(),
+            manifest: None,
+            miss_reason: Some(ProbeReason::NoManifest),
+        }
+    } else {
+        cohort.probe(vcf_path, annotations_path)
+    };
+
+    let staging_dir = {
+        let parent = cohort.dir().parent().ok_or_else(|| {
+            CohortError::Resource(format!(
+                "cohort dir '{}' has no parent",
+                cohort.dir().display()
+            ))
+        })?;
+        let mut name = cohort
+            .dir()
+            .file_name()
+            .ok_or_else(|| {
+                CohortError::Resource(format!(
+                    "cohort dir '{}' has no file name",
+                    cohort.dir().display()
+                ))
+            })?
+            .to_os_string();
+        name.push(".geno_staging");
+        parent.join(name)
+    };
+
+    out.status(&format!(
+        "Building cohort '{}' from multi-sample VCF ({n_samples} samples)",
+        cohort_id.as_str()
+    ));
+
+    let result = cohort.build_or_load(
+        CohortSources {
+            genotypes: vcf_path,
+            annotations: annotations_path,
+        },
+        BuildOpts {
+            staging_dir: &staging_dir,
+            rebuild: config.rebuild,
+            probe,
+        },
+        engine,
+        out,
+    )?;
+
+    out.success(&format!(
+        "Cohort '{}': {} variants × {} samples at {}",
+        cohort_id.as_str(),
+        result.manifest.n_variants,
+        result.manifest.n_samples,
+        result.store_dir.display(),
+    ));
+
+    out.result_json(&json!({
+        "status": "ok",
+        "cohort_id": cohort_id.as_str(),
+        "store_dir": result.store_dir.to_string_lossy(),
+        "n_variants": result.manifest.n_variants,
+        "n_samples": result.manifest.n_samples,
+    }));
+
+    Ok(())
 }
 
 fn run_ingest_dry(

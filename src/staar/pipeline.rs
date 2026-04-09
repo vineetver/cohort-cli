@@ -1,18 +1,7 @@
 //! STAAR analysis pipeline orchestration.
-//!
-//! Owns `StaarConfig`, `StaarPipeline`, the per-run manifest, and the typed
-//! stage functions. Per-gene and per-window scoring live in `scoring.rs`.
-//!
-//! Stage layout (each is a small function on `StaarPipeline`):
-//! ```text
-//! validate → ensure_store → load_phenotype → fit_null_model
-//!   → ensure_score_cache → run_scoring → write_results
-//! ```
-//! After each stage the manifest is rewritten atomically so an interrupted
-//! run can be inspected to see exactly how far it got.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use faer::Mat;
 
@@ -40,10 +29,17 @@ use crate::store::cohort::{
 use crate::store::list::{AnnotatedSet, VariantSet, VariantSetKind};
 use crate::types::{AnnotatedVariant, Chromosome};
 
+pub enum CohortSource {
+    Existing,
+    Fresh {
+        genotypes: PathBuf,
+        annotations: PathBuf,
+    },
+}
+
 pub struct StaarConfig {
-    pub genotypes: PathBuf,
+    pub cohort_source: CohortSource,
     pub phenotype: PathBuf,
-    pub annotations: PathBuf,
     pub trait_names: Vec<String>,
     pub covariates: Vec<String>,
     pub mask_categories: Vec<MaskCategory>,
@@ -52,14 +48,10 @@ pub struct StaarConfig {
     pub individual: bool,
     pub spa: bool,
     pub ancestry_col: Option<String>,
-    /// AI-STAAR ensemble base test count B.
     pub ai_base_tests: usize,
-    /// AI-STAAR ensemble RNG seed.
     pub ai_seed: u64,
     pub scang_params: ScangParams,
-    /// Kinship matrix files for mixed-model analysis. Empty = no kinship.
     pub kinship: Vec<PathBuf>,
-    /// Phenotype column for heteroscedastic residual variance partition.
     pub kinship_groups: Option<String>,
     pub known_loci: Option<PathBuf>,
     pub emit_sumstats: bool,
@@ -67,6 +59,23 @@ pub struct StaarConfig {
     pub column_map: HashMap<String, String>,
     pub output_dir: PathBuf,
     pub cohort_id: CohortId,
+    pub cohort_manifest_proxy: PathBuf,
+}
+
+impl StaarConfig {
+    pub fn genotypes(&self) -> Option<&Path> {
+        match &self.cohort_source {
+            CohortSource::Fresh { genotypes, .. } => Some(genotypes.as_path()),
+            CohortSource::Existing => None,
+        }
+    }
+
+    pub fn annotations(&self) -> Option<&Path> {
+        match &self.cohort_source {
+            CohortSource::Fresh { annotations, .. } => Some(annotations.as_path()),
+            CohortSource::Existing => None,
+        }
+    }
 }
 
 impl StaarConfig {
@@ -78,7 +87,6 @@ impl StaarConfig {
         self.output_dir.join("sumstats").join(&self.trait_names[0])
     }
 
-    /// What this run actually does end-to-end.
     pub fn run_mode(&self) -> RunMode {
         if self.emit_sumstats {
             RunMode::EmitSumstats
@@ -87,11 +95,6 @@ impl StaarConfig {
         }
     }
 
-    /// Choose the scoring backend from the trait type and CLI flags.
-    ///
-    /// Trait type is required because SPA only applies to binary traits;
-    /// for continuous traits with `--spa` we drop back to Standard and warn
-    /// at the call site.
     pub fn scoring_mode(&self, trait_type: TraitType) -> ScoringMode {
         if self.ancestry_col.is_some() {
             ScoringMode::AiStaar
@@ -102,14 +105,10 @@ impl StaarConfig {
         }
     }
 
-    /// True if this run uses any kinship-aware path (REML or PQL).
-    /// Single source of truth for the predicate, used by `null_model_kind`
-    /// and the SPA-vs-kinship warning in `warn_mode_combinations`.
     pub fn has_kinship(&self) -> bool {
         !self.kinship.is_empty() || self.kinship_groups.is_some()
     }
 
-    /// Pick the null-model fitter from trait type + kinship presence.
     pub fn null_model_kind(&self, trait_type: TraitType) -> NullModelKind {
         match (trait_type, self.has_kinship()) {
             (TraitType::Continuous, false) => NullModelKind::Glm,
@@ -121,11 +120,17 @@ impl StaarConfig {
 }
 
 impl StaarConfig {
-    /// Borrowed view fed into `run_manifest::compute_config_hash`.
     pub fn hash_inputs(&self) -> ConfigHashInputs<'_> {
+        let (genotypes, annotations): (&Path, &Path) = match &self.cohort_source {
+            CohortSource::Fresh { genotypes, annotations } => (genotypes, annotations),
+            CohortSource::Existing => {
+                let p: &Path = self.cohort_manifest_proxy.as_ref();
+                (p, p)
+            }
+        };
         ConfigHashInputs {
-            genotypes: &self.genotypes,
-            annotations: &self.annotations,
+            genotypes,
+            annotations,
             phenotype: &self.phenotype,
             trait_names: &self.trait_names,
             covariates: &self.covariates,
@@ -149,29 +154,19 @@ impl StaarConfig {
     }
 }
 
-/// Output of `stage_run_scoring`. `individual_pvals` is reserved for the
-/// `--individual` per-variant path; today the producer in
-/// `scoring::run_score_tests` returns `Vec::new()`. Field stays so a
-/// future producer doesn't have to ripple a new tuple shape up the stack.
 pub struct ScoringOutput {
     pub results: ResultSet,
     pub individual_pvals: Vec<(usize, f64)>,
 }
 
-/// Per-run scoring context: fixed once after the null model is fit.
 pub struct ScoringContext {
     pub analysis: AnalysisVectors,
     pub scoring_mode: ScoringMode,
     pub cache_dir: PathBuf,
     pub ancestry: Option<AncestryInfo>,
-    /// True iff `--spa` was requested AND the trait is binary. Recorded once
-    /// at construction so the `--ancestry-col --spa --binary-trait` triple
-    /// keeps SPA inside the per-population AI-STAAR kernel without
-    /// recomputing the predicate at every gene.
     pub spa_active: bool,
 }
 
-/// Output of `load_phenotype` stage.
 struct PhenoStageOut {
     y: Mat<f64>,
     x: Mat<f64>,
@@ -179,12 +174,7 @@ struct PhenoStageOut {
     n: usize,
     pheno_mask: Vec<bool>,
     ancestry: Option<AncestryInfo>,
-    /// Compact sample list aligned to `pheno_mask` (only samples with both
-    /// phenotype and genotype). Used by kinship loaders.
     compact_samples: Vec<String>,
-    /// Genotype-result view rebuilt once and shared with kinship loading.
-    /// Lives here so `stage_fit_null_model` doesn't have to reach back into
-    /// `GenoStoreResult` and reconstruct one of these by hand.
     genotype_result: staar::genotype::GenotypeResult,
 }
 
@@ -358,24 +348,49 @@ impl<'a> StaarPipeline<'a> {
     }
 
     fn stage_validate(&mut self) -> Result<(), CohortError> {
+        // For the `Existing` cohort path the operator is loading a cohort
+        // by id; the original annotated set may have been deleted. The
+        // tier check happened at `cohort ingest` time, baked into the
+        // cohort store via the rebuild fingerprint. Just probe the
+        // manifest exists; the load stage gives a typed error otherwise.
+        let annotations = match &self.config.cohort_source {
+            CohortSource::Fresh { annotations, .. } => annotations,
+            CohortSource::Existing => {
+                if !self.config.cohort_manifest_proxy.exists() {
+                    return Err(CohortError::DataMissing(format!(
+                        "Cohort '{}' not found at {}. Run `cohort ingest <vcf> \
+                         --annotations <set> --cohort-id {}` first.",
+                        self.config.cohort_id.as_str(),
+                        self.config
+                            .cohort_manifest_proxy
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        self.config.cohort_id.as_str(),
+                    )));
+                }
+                return Ok(());
+            }
+        };
+
         // `build_config` already verified the annotation path exists; if it
         // disappeared between then and now we want a hard error, not silent
         // skip — surface the missing-file message rather than no-op.
-        if !self.config.annotations.exists() {
+        if !annotations.exists() {
             return Err(CohortError::Input(format!(
                 "Annotations no longer at '{}'. Re-run `cohort annotate` or check the path.",
-                self.config.annotations.display()
+                annotations.display()
             )));
         }
 
         // Typed tier check: STAAR needs all 11 annotation weight columns.
-        if let Ok(annotated) = AnnotatedSet::open(&self.config.annotations) {
+        if let Ok(annotated) = AnnotatedSet::open(annotations) {
             let weight_cols: Vec<crate::column::Col> = STAAR_WEIGHTS.to_vec();
             annotated.supports(&weight_cols)?;
         }
 
         // Raw annotation column contract.
-        let ann_vs = VariantSet::open(&self.config.annotations)?;
+        let ann_vs = VariantSet::open(annotations)?;
         let contract = ColumnContract {
             command: "staar",
             required: STAAR_ANNOTATION_COLUMNS,
@@ -393,17 +408,34 @@ impl<'a> StaarPipeline<'a> {
         Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
              STAAR requires FAVOR full-tier annotations.{}",
-            self.config.annotations.display(),
+            annotations.display(),
             ColumnContract::format_missing(&missing),
             tier_hint,
         )))
     }
 
     fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, CohortError> {
+        let cohort = self.engine.cohort(&self.config.cohort_id);
+
+        // Existing cohort path: trust the manifest, no rebuild, no probe.
+        // The operator already built this cohort via `cohort ingest`.
+        if matches!(self.config.cohort_source, CohortSource::Existing) {
+            self.manifest.outputs.cache_decisions.push(CacheDecision {
+                artifact: ArtifactKind::GenotypeStore,
+                outcome: CacheOutcome::Hit,
+                reason: "loaded by cohort id".into(),
+            });
+            return cohort.load(self.engine);
+        }
+
+        let (genotypes, annotations) = match &self.config.cohort_source {
+            CohortSource::Fresh { genotypes, annotations } => (genotypes, annotations),
+            CohortSource::Existing => unreachable!("handled above"),
+        };
+
         // One probe — the recorded cache decision and the path actually
         // taken in `build_or_load` are sourced from the same StoreProbe
         // so they cannot drift.
-        let cohort = self.engine.cohort(&self.config.cohort_id);
         let probe = if self.config.rebuild_store {
             self.manifest.outputs.cache_decisions.push(CacheDecision {
                 artifact: ArtifactKind::GenotypeStore,
@@ -423,7 +455,7 @@ impl<'a> StaarPipeline<'a> {
                 miss_reason: None,
             }
         } else {
-            let probe = cohort.probe(&self.config.genotypes, &self.config.annotations);
+            let probe = cohort.probe(genotypes, annotations);
             let decision = if probe.manifest.is_some() {
                 CacheDecision {
                     artifact: ArtifactKind::GenotypeStore,
@@ -449,8 +481,8 @@ impl<'a> StaarPipeline<'a> {
         let geno_staging_dir = self.config.output_dir.join(".geno_staging");
         cohort.build_or_load(
             crate::store::cohort::CohortSources {
-                genotypes: &self.config.genotypes,
-                annotations: &self.config.annotations,
+                genotypes,
+                annotations,
             },
             crate::store::cohort::BuildOpts {
                 staging_dir: &geno_staging_dir,
@@ -796,9 +828,11 @@ mod tests {
 
     fn dummy_config() -> StaarConfig {
         StaarConfig {
-            genotypes: PathBuf::from("/tmp/g.vcf.gz"),
+            cohort_source: CohortSource::Fresh {
+                genotypes: PathBuf::from("/tmp/g.vcf.gz"),
+                annotations: PathBuf::from("/tmp/a.annotated"),
+            },
             phenotype: PathBuf::from("/tmp/p.tsv"),
-            annotations: PathBuf::from("/tmp/a.annotated"),
             trait_names: vec!["BMI".into()],
             covariates: vec!["age".into(), "sex".into()],
             mask_categories: vec![MaskCategory::Coding],
@@ -822,6 +856,7 @@ mod tests {
             column_map: HashMap::new(),
             output_dir: PathBuf::from("/tmp/out"),
             cohort_id: CohortId::new("dummy"),
+            cohort_manifest_proxy: PathBuf::from(".cohort/cohorts/dummy/manifest.json"),
         }
     }
 

@@ -1,8 +1,4 @@
 //! Chromosome-partitioned variant containers.
-//!
-//! On-disk shape: one `meta.json` per set + `chromosome={chr}/data.parquet`
-//! shards. `VariantSet` reads, `VariantSetWriter` builds, `AnnotatedSet`
-//! adds tier-aware column checks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -159,8 +155,6 @@ impl VariantSetWriter {
         self.kind = Some(kind);
     }
 
-    /// Scan written parquet files to populate per-chrom metadata.
-    /// Uses parquet file metadata directly — no query engine needed.
     pub fn scan_and_register(&mut self) -> Result<(), CohortError> {
         let entries = std::fs::read_dir(&self.root).map_err(|e| {
             CohortError::Resource(format!("Cannot read {}: {e}", self.root.display()))

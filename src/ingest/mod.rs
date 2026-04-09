@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CohortError;
 
-/// Detected input format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputFormat {
@@ -21,7 +20,6 @@ pub enum InputFormat {
     Parquet,
 }
 
-/// Detected delimiter for tabular files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Delimiter {
     Tab,
@@ -43,7 +41,6 @@ impl Delimiter {
     }
 }
 
-/// How the ingested data can join against annotations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinKey {
@@ -52,7 +49,6 @@ pub enum JoinKey {
     ChromPos,
 }
 
-/// Detected genome build.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "verdict")]
 pub enum BuildGuess {
@@ -67,7 +63,6 @@ pub enum BuildGuess {
     Unknown,
 }
 
-/// Detected coordinate base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordBase {
@@ -76,14 +71,12 @@ pub enum CoordBase {
     Unknown,
 }
 
-/// A resolved column mapping.
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnMapping {
     pub input_name: String,
     pub canonical: &'static str,
 }
 
-/// Something the CLI couldn't resolve with >95% confidence.
 #[derive(Debug, Clone, Serialize)]
 pub struct Ambiguity {
     pub column: String,
@@ -91,7 +84,6 @@ pub struct Ambiguity {
     pub reason: &'static str,
 }
 
-/// Summary of the analyzed input.
 #[derive(Debug, Serialize)]
 pub struct Analysis {
     pub format: InputFormat,
@@ -103,27 +95,20 @@ pub struct Analysis {
     pub join_key: JoinKey,
     pub build_guess: BuildGuess,
     pub coord_base: CoordBase,
-    /// The column name in the input that maps to "chromosome"
     pub chr_col: Option<String>,
-    /// The column name in the input that maps to "position"
     pub pos_col: Option<String>,
-    /// The column name in the input that maps to "ref"
     pub ref_col: Option<String>,
-    /// The column name in the input that maps to "alt"
     pub alt_col: Option<String>,
-    /// The column name in the input that maps to "rsid"
     pub rsid_col: Option<String>,
 }
 
 impl Analysis {
-    /// Can we proceed automatically, or does the user/agent need to intervene?
     pub fn needs_intervention(&self) -> bool {
         !self.ambiguous.is_empty()
             || matches!(self.build_guess, BuildGuess::Hg19 { .. })
             || matches!(self.coord_base, CoordBase::ZeroBased)
     }
 
-    /// Status string for machine output.
     pub fn status(&self) -> &'static str {
         if self.needs_intervention() {
             "needs_edit"
@@ -133,7 +118,6 @@ impl Analysis {
     }
 }
 
-/// Detect input format from the file extension and first line.
 pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), CohortError> {
     let name = path
         .file_name()
@@ -146,7 +130,6 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Co
         .to_string_lossy()
         .to_lowercase();
 
-    // VCF: extension-only detection
     if name.ends_with(".vcf")
         || name.ends_with(".vcf.gz")
         || name.ends_with(".vcf.bgz")
@@ -155,12 +138,10 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Co
         return Ok((InputFormat::Vcf, None));
     }
 
-    // Parquet: extension-only detection
     if name.ends_with(".parquet") {
         return Ok((InputFormat::Parquet, None));
     }
 
-    // Tabular: detect delimiter from first line
     if name.ends_with(".tsv")
         || name.ends_with(".tsv.gz")
         || name.ends_with(".csv")
@@ -172,7 +153,6 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Co
         return Ok((InputFormat::Tabular, Some(delim)));
     }
 
-    // Unknown extension — try to sniff
     if path.is_file() {
         let delim = sniff_delimiter(path);
         if let Ok(d) = delim {
@@ -186,13 +166,11 @@ pub fn detect_format(path: &Path) -> Result<(InputFormat, Option<Delimiter>), Co
     )))
 }
 
-/// Sniff delimiter from the first line of a text file.
 pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, CohortError> {
     let file = std::fs::File::open(path)
         .map_err(|e| CohortError::Input(format!("Cannot open '{}': {e}", path.display())))?;
 
     if path.to_string_lossy().ends_with(".gz") {
-        // For .gz files, engine handles decompression — default to tab
         return Ok(Delimiter::Tab);
     }
 
@@ -202,9 +180,8 @@ pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, CohortError> {
         .read_line(&mut first_line)
         .map_err(|e| CohortError::Input(format!("Cannot read '{}': {e}", path.display())))?;
 
-    // Skip VCF header lines
     if first_line.starts_with("##") || first_line.starts_with("#CHROM") {
-        return Ok(Delimiter::Tab); // VCF is always tab
+        return Ok(Delimiter::Tab);
     }
 
     let tab_count = first_line.matches('\t').count();
@@ -217,7 +194,7 @@ pub(crate) fn sniff_delimiter(path: &Path) -> Result<Delimiter, CohortError> {
     } else if first_line.split_whitespace().count() >= 3 {
         Ok(Delimiter::Space)
     } else {
-        Ok(Delimiter::Tab) // default
+        Ok(Delimiter::Tab)
     }
 }
 

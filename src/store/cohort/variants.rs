@@ -1,11 +1,4 @@
 //! Variant metadata index and carrier data types.
-//!
-//! VariantIndex loads aligned metadata vectors from variants.parquet and
-//! gene membership from membership.parquet. All data is indexed by variant_vcf
-//! — a dense, immutable index assigned at store build time.
-//!
-//! CarrierList and CarrierEntry are the canonical sparse genotype types
-//! consumed by scoring kernels.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,14 +10,12 @@ use crate::types::{
     RegulatoryFlags,
 };
 
-/// A single carrier entry: (sample_index, dosage).
 #[derive(Clone, Copy, Debug)]
 pub struct CarrierEntry {
     pub sample_idx: u32,
     pub dosage: u8,
 }
 
-/// Carrier list for one variant — all non-reference samples.
 #[derive(Clone, Debug)]
 pub struct CarrierList {
     pub entries: Vec<CarrierEntry>,
@@ -49,17 +40,18 @@ impl CarrierList {
     }
 }
 
-/// A named weight vector aligned to variant_vcf.
 #[allow(dead_code)] // fields accessed via VariantIndex weight methods
 pub struct WeightVector {
     pub name: &'static str,
     pub values: Vec<f64>,
 }
 
-/// One variant's metadata as loaded from variants.parquet.
 #[derive(Clone, Debug)]
 pub struct VariantIndexEntry {
     pub position: u32,
+    /// Stored explicitly so interval queries do not need to recompute it from `ref_allele`.
+    #[allow(dead_code)] // populated and round-trip-tested; reader added in a later phase
+    pub end_position: u32,
     pub ref_allele: Box<str>,
     pub alt_allele: Box<str>,
     pub vid: Box<str>,
@@ -73,7 +65,6 @@ pub struct VariantIndexEntry {
 }
 
 impl VariantIndexEntry {
-    /// Convert to the canonical AnnotatedVariant type.
     pub fn to_annotated_variant(&self, chrom: Chromosome) -> AnnotatedVariant {
         AnnotatedVariant {
             chromosome: chrom,
@@ -93,7 +84,6 @@ impl VariantIndexEntry {
         }
     }
 
-    /// Convert with an explicit gene name (for mask predicates that check gene_name).
     pub fn to_annotated_variant_with_gene(
         &self,
         chrom: Chromosome,
@@ -105,23 +95,15 @@ impl VariantIndexEntry {
     }
 }
 
-/// All variant metadata for one chromosome, indexed by variant_vcf.
-/// Provides aligned vectors and on-demand mask compilation.
 pub struct VariantIndex {
-    /// Variant metadata indexed by variant_vcf. entries[i] = variant_vcf i.
     entries: Vec<VariantIndexEntry>,
-    /// gene_name → sorted Vec<u32> of variant_vcfs belonging to this gene.
-    /// Loaded from membership.parquet.
     gene_variants: HashMap<String, Vec<u32>>,
-    /// vid string → variant_vcf.
     vid_to_vcf: HashMap<Box<str>, u32>,
-    /// Named weight vectors, each of length n_variants, aligned to variant_vcf.
     #[allow(dead_code)]
     pub weight_channels: Vec<WeightVector>,
 }
 
 impl VariantIndex {
-    /// Load from variants.parquet + membership.parquet in a chromosome directory.
     pub fn load(backend: &dyn Backend, chrom_dir: &Path) -> Result<Self, CohortError> {
         let variants_reader = backend.open_parquet(&chrom_dir.join("variants.parquet"))?;
         let entries = load_variant_entries(variants_reader)?;
@@ -161,7 +143,6 @@ impl VariantIndex {
         })
     }
 
-    /// Gene → variant_vcf set (sorted). Empty slice if gene not found.
     pub fn gene_variant_vcfs(&self, gene: &str) -> &[u32] {
         self.gene_variants
             .get(gene)
@@ -169,19 +150,14 @@ impl VariantIndex {
             .unwrap_or(&[])
     }
 
-    /// All gene names.
     pub fn gene_names(&self) -> impl Iterator<Item = &str> {
         self.gene_variants.keys().map(|s| s.as_str())
     }
 
-    /// Number of genes.
     pub fn n_genes(&self) -> usize {
         self.gene_variants.len()
     }
 
-    /// Compile a mask on demand: applies MAF + predicate to a gene's variants.
-    /// Returns qualifying variant_vcfs as LOCAL indices into gene_vcfs.
-    /// No pre-materialization — memory stays O(N) for base metadata.
     #[allow(dead_code)]
     pub fn compile_mask(
         &self,
@@ -202,34 +178,28 @@ impl VariantIndex {
             .collect()
     }
 
-    /// Get variant metadata by variant_vcf (O(1) direct index).
     #[inline]
     pub fn get(&self, variant_vcf: u32) -> &VariantIndexEntry {
         &self.entries[variant_vcf as usize]
     }
 
-    /// Resolve vid string → variant_vcf.
     pub fn resolve_vid(&self, vid: &str) -> Option<u32> {
         self.vid_to_vcf.get(vid).copied()
     }
 
-    /// Total number of variant entries.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// All entries (for sliding window / SCANG that operate across genes).
     pub fn all_entries(&self) -> &[VariantIndexEntry] {
         &self.entries
     }
 
-    /// Get a weight channel by index.
     #[allow(dead_code)]
     pub fn weight_channel(&self, index: usize) -> &WeightVector {
         &self.weight_channels[index]
     }
 
-    /// Extract weight values for a subset of variant_vcfs.
     #[allow(dead_code)]
     pub fn weight_values(&self, channel: usize, variant_vcfs: &[u32]) -> Vec<f64> {
         let vals = &self.weight_channels[channel].values;
@@ -237,8 +207,28 @@ impl VariantIndex {
     }
 }
 
+/// Look up a typed Arrow array by column name so schema reorderings stay safe.
+fn col_by_name<'a, T: arrow::array::Array + 'static>(
+    batch: &'a arrow::record_batch::RecordBatch,
+    name: &str,
+) -> Result<&'a T, CohortError> {
+    let idx = batch
+        .schema()
+        .index_of(name)
+        .map_err(|_| CohortError::Resource(format!("variants.parquet missing column {name}")))?;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| {
+            CohortError::Resource(format!("variants.parquet column {name} has wrong type"))
+        })
+}
+
 fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntry>, CohortError> {
-    use arrow::array::{BooleanArray, Float64Array, Int32Array, StringArray, UInt32Array};
+    use arrow::array::{BooleanArray, Float64Array, Int32Array, StringArray};
+
+    use crate::column::{Col, STAAR_WEIGHTS};
 
     let mut entries = Vec::new();
 
@@ -246,91 +236,25 @@ fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntr
         let batch = batch_result.map_err(|e| CohortError::Resource(format!("Read: {e}")))?;
         let n = batch.num_rows();
 
-        // Schema: variant_vcf(0), position(1), ref(2), alt(3), vid(4), maf(5),
-        //         region_type(6), consequence(7), cadd(8), revel(9),
-        //         cage_prom(10), cage_enh(11), ccre_prom(12), ccre_enh(13),
-        //         w_cadd(14)..w_apc_tf(24)
-        let _vvcf_arr = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        let pos_arr = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let ref_arr = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let alt_arr = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let vid_arr = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let maf_arr = batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        let rt_arr = batch
-            .column(6)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let csq_arr = batch
-            .column(7)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let cadd_arr = batch
-            .column(8)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        let revel_arr = batch
-            .column(9)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        let cp_arr = batch
-            .column(10)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        let ce_arr = batch
-            .column(11)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        let crp_arr = batch
-            .column(12)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        let cre_arr = batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
+        let pos_arr = col_by_name::<Int32Array>(&batch, Col::Position.as_str())?;
+        let end_arr = col_by_name::<Int32Array>(&batch, Col::EndPosition.as_str())?;
+        let ref_arr = col_by_name::<StringArray>(&batch, Col::RefAllele.as_str())?;
+        let alt_arr = col_by_name::<StringArray>(&batch, Col::AltAllele.as_str())?;
+        let vid_arr = col_by_name::<StringArray>(&batch, Col::Vid.as_str())?;
+        let maf_arr = col_by_name::<Float64Array>(&batch, Col::Maf.as_str())?;
+        let rt_arr = col_by_name::<StringArray>(&batch, Col::RegionType.as_str())?;
+        let csq_arr = col_by_name::<StringArray>(&batch, Col::Consequence.as_str())?;
+        let cadd_arr = col_by_name::<Float64Array>(&batch, Col::CaddPhred.as_str())?;
+        let revel_arr = col_by_name::<Float64Array>(&batch, Col::Revel.as_str())?;
+        let cp_arr = col_by_name::<BooleanArray>(&batch, Col::IsCagePromoter.as_str())?;
+        let ce_arr = col_by_name::<BooleanArray>(&batch, Col::IsCageEnhancer.as_str())?;
+        let crp_arr = col_by_name::<BooleanArray>(&batch, Col::IsCcrePromoter.as_str())?;
+        let cre_arr = col_by_name::<BooleanArray>(&batch, Col::IsCcreEnhancer.as_str())?;
 
-        let mut w_arrs: Vec<&Float64Array> = Vec::with_capacity(11);
-        for i in 0..11 {
-            w_arrs.push(
-                batch
-                    .column(14 + i)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap(),
-            );
-        }
+        let w_arrs: Vec<&Float64Array> = STAAR_WEIGHTS
+            .iter()
+            .map(|c| col_by_name::<Float64Array>(&batch, c.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
 
         for i in 0..n {
             let mut weights = [0.0f64; 11];
@@ -339,11 +263,10 @@ fn load_variant_entries(reader: BoxedBatchReader) -> Result<Vec<VariantIndexEntr
                 weights[ch] = if w.is_finite() { w } else { 0.0 };
             }
 
-            let position = pos_arr.value(i) as u32;
-            let ref_str = ref_arr.value(i);
             entries.push(VariantIndexEntry {
-                position,
-                ref_allele: ref_str.into(),
+                position: pos_arr.value(i) as u32,
+                end_position: end_arr.value(i) as u32,
+                ref_allele: ref_arr.value(i).into(),
                 alt_allele: alt_arr.value(i).into(),
                 vid: vid_arr.value(i).into(),
                 maf: maf_arr.value(i),
@@ -375,6 +298,7 @@ mod tests {
         let entries = vec![
             VariantIndexEntry {
                 position: 100,
+                end_position: 100,
                 ref_allele: "A".into(),
                 alt_allele: "T".into(),
                 vid: "22-100-A-T".into(),
@@ -388,6 +312,7 @@ mod tests {
             },
             VariantIndexEntry {
                 position: 200,
+                end_position: 200,
                 ref_allele: "C".into(),
                 alt_allele: "G".into(),
                 vid: "22-200-C-G".into(),
@@ -401,6 +326,7 @@ mod tests {
             },
             VariantIndexEntry {
                 position: 300,
+                end_position: 300,
                 ref_allele: "G".into(),
                 alt_allele: "A".into(),
                 vid: "22-300-G-A".into(),
@@ -465,7 +391,6 @@ mod tests {
         let vi = make_test_index();
         let g1 = vi.gene_variant_vcfs("GENE1");
         let g2 = vi.gene_variant_vcfs("GENE2");
-        // variant_vcf 1 belongs to both genes
         assert!(g1.contains(&1));
         assert!(g2.contains(&1));
     }
@@ -526,25 +451,21 @@ mod tests {
         let gene_vcfs = vi.gene_variant_vcfs("GENE1");
         let chrom = Chromosome::Autosome(22);
 
-        // All pass (maf_cutoff = 1.0, always-true predicate)
         let all = vi.compile_mask(gene_vcfs, 1.0, chrom, "GENE1", |_| true);
         assert_eq!(all, vec![0, 1]);
 
-        // MAF filter: only variant 0 (maf=0.001) passes cutoff 0.002
         let maf_filtered = vi.compile_mask(gene_vcfs, 0.002, chrom, "GENE1", |_| true);
         assert_eq!(maf_filtered, vec![0]);
 
-        // Predicate filter: only missense
         let missense_only = vi.compile_mask(gene_vcfs, 1.0, chrom, "GENE1", |av| {
             av.annotation.consequence.is_missense()
         });
-        assert_eq!(missense_only, vec![0]); // variant 0 is MissenseVariant
+        assert_eq!(missense_only, vec![0]);
 
-        // Combined: maf < 0.01 AND is_plof
         let plof = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
             av.annotation.consequence.is_plof()
         });
-        assert_eq!(plof, vec![1]); // variant 1 is Stopgain (pLoF)
+        assert_eq!(plof, vec![1]);
     }
 
     #[test]
@@ -553,12 +474,10 @@ mod tests {
         let gene_vcfs = vi.gene_variant_vcfs("GENE1");
         let chrom = Chromosome::Autosome(22);
 
-        // Path A: compile_mask with combined predicate
         let combined = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
             av.annotation.consequence.is_missense() || av.annotation.consequence.is_plof()
         });
 
-        // Path B: union of two separate masks
         let missense = vi.compile_mask(gene_vcfs, 0.01, chrom, "GENE1", |av| {
             av.annotation.consequence.is_missense()
         });
@@ -610,17 +529,13 @@ mod tests {
         assert_eq!(av.annotation.consequence, Consequence::MissenseVariant);
     }
 
-    /// Region query == manual scan over entries[].
-    /// Validates "region = mask over variant_vcf" assumption.
     #[test]
     fn region_mask_equivalence() {
         let vi = make_test_index();
 
-        // Region [150, 250] should match variant_vcf 1 (position 200)
         let start = 150u32;
         let end = 250u32;
 
-        // Path A: manual scan
         let manual: Vec<u32> = vi
             .all_entries()
             .iter()
@@ -629,7 +544,6 @@ mod tests {
             .map(|(i, _)| i as u32)
             .collect();
 
-        // Path B: this is what any region query resolves to
         let region_mask: Vec<u32> = (0..vi.len() as u32)
             .filter(|&v| {
                 let pos = vi.get(v).position;
@@ -640,13 +554,11 @@ mod tests {
         assert_eq!(manual, region_mask);
         assert_eq!(manual, vec![1u32]);
 
-        // Wider region [0, 500] should match all
         let all: Vec<u32> = (0..vi.len() as u32)
             .filter(|&v| vi.get(v).position <= 500)
             .collect();
         assert_eq!(all, vec![0, 1, 2]);
 
-        // Empty region [400, 500] should match none
         let empty: Vec<u32> = (0..vi.len() as u32)
             .filter(|&v| {
                 let pos = vi.get(v).position;
@@ -656,7 +568,6 @@ mod tests {
         assert!(empty.is_empty());
     }
 
-    /// Cross-layer: vid computed from metadata matches stored vid.
     #[test]
     fn vid_from_metadata_matches_stored() {
         let vi = make_test_index();
@@ -669,5 +580,89 @@ mod tests {
                 e.vid
             );
         }
+    }
+
+    #[test]
+    fn variants_parquet_schema_round_trip() {
+        use std::sync::Arc;
+
+        use arrow::array::{
+            BooleanArray, Float64Array, Int32Array, RecordBatchIterator, StringArray, UInt32Array,
+        };
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::column::{Col, STAAR_WEIGHTS};
+
+        let mut fields = vec![
+            Field::new(Col::VariantVcf.as_str(), DataType::UInt32, false),
+            Field::new(Col::Position.as_str(), DataType::Int32, false),
+            Field::new(Col::EndPosition.as_str(), DataType::Int32, false),
+            Field::new(Col::RefAllele.as_str(), DataType::Utf8, false),
+            Field::new(Col::AltAllele.as_str(), DataType::Utf8, false),
+            Field::new(Col::Vid.as_str(), DataType::Utf8, false),
+            Field::new(Col::Maf.as_str(), DataType::Float64, false),
+            Field::new(Col::RegionType.as_str(), DataType::Utf8, false),
+            Field::new(Col::Consequence.as_str(), DataType::Utf8, false),
+            Field::new(Col::CaddPhred.as_str(), DataType::Float64, false),
+            Field::new(Col::Revel.as_str(), DataType::Float64, false),
+            Field::new(Col::IsCagePromoter.as_str(), DataType::Boolean, false),
+            Field::new(Col::IsCageEnhancer.as_str(), DataType::Boolean, false),
+            Field::new(Col::IsCcrePromoter.as_str(), DataType::Boolean, false),
+            Field::new(Col::IsCcreEnhancer.as_str(), DataType::Boolean, false),
+        ];
+        for col in &STAAR_WEIGHTS {
+            fields.push(Field::new(col.as_str(), DataType::Float64, false));
+        }
+        let schema = Arc::new(Schema::new(fields));
+
+        let mut columns: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(UInt32Array::from(vec![0u32, 1u32])),
+            Arc::new(Int32Array::from(vec![100i32, 200i32])),
+            Arc::new(Int32Array::from(vec![100i32, 203i32])),
+            Arc::new(StringArray::from(vec!["A", "ACGT"])),
+            Arc::new(StringArray::from(vec!["T", "A"])),
+            Arc::new(StringArray::from(vec!["22-100-A-T", "22-200-ACGT-A"])),
+            Arc::new(Float64Array::from(vec![0.001, 0.005])),
+            Arc::new(StringArray::from(vec!["exonic", "intronic"])),
+            Arc::new(StringArray::from(vec!["missense_variant", ""])),
+            Arc::new(Float64Array::from(vec![25.0, 5.0])),
+            Arc::new(Float64Array::from(vec![0.8, 0.1])),
+            Arc::new(BooleanArray::from(vec![false, false])),
+            Arc::new(BooleanArray::from(vec![false, true])),
+            Arc::new(BooleanArray::from(vec![true, false])),
+            Arc::new(BooleanArray::from(vec![false, false])),
+        ];
+        for ch in 0..11 {
+            let v0 = 0.10 + 0.01 * ch as f64;
+            let v1 = 0.50 + 0.01 * ch as f64;
+            columns.push(Arc::new(Float64Array::from(vec![v0, v1])));
+        }
+
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let reader: BoxedBatchReader =
+            Box::new(RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema));
+        let entries = load_variant_entries(reader).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].position, 100);
+        assert_eq!(entries[0].end_position, 100);
+        assert_eq!(&*entries[0].ref_allele, "A");
+        assert_eq!(&*entries[0].alt_allele, "T");
+        assert_eq!(&*entries[0].vid, "22-100-A-T");
+        assert_eq!(entries[0].maf, 0.001);
+        assert_eq!(entries[0].region_type, RegionType::Exonic);
+        assert_eq!(entries[0].consequence, Consequence::MissenseVariant);
+        assert_eq!(entries[0].cadd_phred, 25.0);
+        assert!(entries[0].regulatory.ccre_promoter);
+        assert!(!entries[0].regulatory.cage_enhancer);
+        for ch in 0..11 {
+            assert!((entries[0].weights.0[ch] - (0.10 + 0.01 * ch as f64)).abs() < 1e-12);
+        }
+
+        assert_eq!(entries[1].position, 200);
+        assert_eq!(entries[1].end_position, 203);
+        assert_eq!(&*entries[1].ref_allele, "ACGT");
+        assert!(entries[1].regulatory.cage_enhancer);
     }
 }

@@ -1,12 +1,4 @@
-//! SparseG: memory-mapped sparse genotype matrix over (sample_id, variant_vcf).
-//!
-//! The matrix stores only non-reference genotypes as carrier lists per variant.
-//! Variants are ordered by variant_vcf (a dense index assigned at build time,
-//! monotonic by position, ref, alt). An offsets table provides O(1) random
-//! access to any variant's carrier list.
-//!
-//! All queries (region, gene, MAF, annotation) resolve to variant_vcf masks
-//! externally. SparseG only knows about (sample_id, variant_vcf) → dosage.
+//! SparseG: memory-mapped sparse genotype matrix over `(sample_id, variant_vcf)`.
 
 use std::path::Path;
 
@@ -15,29 +7,19 @@ use super::variants::{CarrierEntry, CarrierList};
 use crate::error::CohortError;
 use crate::store::backend::{Backend, MappedBytes};
 
-/// Memory-mapped sparse genotype matrix for one chromosome.
-///
-/// Indexed by variant_vcf. No gene concept — just (sample_id, variant_vcf) → dosage.
-/// variant_vcf is a dense, immutable index over the variant universe for this chromosome.
 pub struct SparseG {
     mmap: MappedBytes,
     wide: bool,
-    /// Byte offset of each variant's carrier data relative to SPARSE_G_HEADER_SIZE.
-    /// offsets[variant_vcf] = byte position of that variant's carrier block.
     offsets: Vec<u64>,
 }
 
 impl SparseG {
-    /// Open a sparse genotype matrix for one chromosome via a backend.
     pub fn open(backend: &dyn Backend, chrom_dir: &Path) -> Result<Self, CohortError> {
         let path = chrom_dir.join("sparse_g.bin");
         let mmap = backend.mmap(&path)?;
         Self::from_mmap(mmap)
     }
 
-    /// Parse the sparse genotype matrix from an already-mapped byte region.
-    /// Used by `open` and by any caller that has already acquired bytes via
-    /// a `Backend` (e.g. a future remote backend that materialises locally).
     pub fn from_mmap(mmap: MappedBytes) -> Result<Self, CohortError> {
         let header = SparseGHeader::read_from(&mmap)
             .map_err(|e| CohortError::Resource(format!("sparse_g.bin: {e}")))?;
@@ -54,7 +36,6 @@ impl SparseG {
             )));
         }
 
-        // Length checked above; chunks_exact(8) yields infallible 8-byte slices.
         let offsets: Vec<u64> = mmap[offsets_start..offsets_start + offsets_bytes]
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
@@ -67,7 +48,6 @@ impl SparseG {
         })
     }
 
-    /// O(1) access: load carrier list for one variant by variant_vcf.
     #[inline]
     pub fn load_variant(&self, variant_vcf: u32) -> CarrierList {
         let byte_offset = self.offsets[variant_vcf as usize];
@@ -75,20 +55,12 @@ impl SparseG {
         self.parse_carrier_list(&self.mmap[data_start..])
     }
 
-    /// Batch access with block prefetching.
-    ///
-    /// Sorts variant_vcfs internally for sequential mmap access (better page
-    /// cache and prefetcher behavior), reads carrier data in one sweep, then
-    /// permutes results back to the caller's order.
     pub fn load_variants(&self, variant_vcfs: &[u32]) -> Vec<CarrierList> {
         let n = variant_vcfs.len();
         if n == 0 {
             return Vec::new();
         }
 
-        // Sort by variant_vcf so the mmap reads land in monotonically
-        // increasing offsets (page-cache friendly), then permute the
-        // results back into the caller's order.
         let mut indexed: Vec<(usize, u32)> = variant_vcfs
             .iter()
             .enumerate()
@@ -105,7 +77,6 @@ impl SparseG {
         sorted_results.into_iter().map(|(_, cl)| cl).collect()
     }
 
-    /// Parse a carrier list from a byte slice starting at the carrier count.
     #[inline]
     fn parse_carrier_list(&self, data: &[u8]) -> CarrierList {
         let n_carriers = u16::from_le_bytes([data[0], data[1]]) as usize;

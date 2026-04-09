@@ -22,7 +22,7 @@ use super::types::{as_u32_slice, CarrierBatch, VariantVcf};
 use super::variants::VariantIndex;
 use super::{
     build, describe_miss, probe as cohort_probe, read_sample_names_at, run_annotation_join,
-    CohortId, GenoStoreResult, StoreProbe,
+    CohortId, CohortManifest, GenoStoreResult, StoreProbe,
 };
 
 pub struct CohortSources<'a> {
@@ -77,6 +77,68 @@ impl<'a> CohortHandle<'a> {
         cohort_probe(&self.dir, genotypes, annotations)
     }
 
+    /// Load a pre-built cohort by id without recomputing the source
+    /// fingerprint. Used by `cohort staar --cohort <id>`: the operator
+    /// already built the cohort via `cohort ingest`, and we trust the
+    /// manifest. Errors with `DataMissing` if the manifest is absent,
+    /// unparseable, on a wrong schema version, or missing chromosome
+    /// artifacts.
+    pub fn load(&self, engine: &Engine) -> Result<GenoStoreResult, CohortError> {
+        let manifest_path = self.dir.join("manifest.json");
+        if !manifest_path.exists() {
+            return Err(CohortError::DataMissing(format!(
+                "Cohort '{}' not found at {}. Run `cohort ingest <vcf> --annotations <set> \
+                 --cohort-id {}` first.",
+                self.id.as_str(),
+                self.dir.display(),
+                self.id.as_str()
+            )));
+        }
+        let manifest_json = std::fs::read_to_string(&manifest_path).map_err(|e| {
+            CohortError::DataMissing(format!(
+                "Cannot read cohort manifest '{}': {e}",
+                manifest_path.display()
+            ))
+        })?;
+        let manifest: CohortManifest = serde_json::from_str(&manifest_json).map_err(|e| {
+            CohortError::DataMissing(format!(
+                "Cohort manifest '{}' is unparseable: {e}",
+                manifest_path.display()
+            ))
+        })?;
+        if manifest.version != 4 {
+            return Err(CohortError::DataMissing(format!(
+                "Cohort '{}' is on schema v{}, this build expects v4. Re-run \
+                 `cohort ingest <vcf> --annotations <set> --cohort-id {} --rebuild`.",
+                self.id.as_str(),
+                manifest.version,
+                self.id.as_str()
+            )));
+        }
+        for ci in &manifest.chromosomes {
+            for artifact in ["sparse_g.bin", "variants.parquet"] {
+                let p = self.dir.join(format!("chromosome={}/{}", ci.name, artifact));
+                if !p.exists() {
+                    return Err(CohortError::DataMissing(format!(
+                        "Cohort '{}' chromosome={} missing {}",
+                        self.id.as_str(),
+                        ci.name,
+                        artifact
+                    )));
+                }
+            }
+        }
+        let sample_names = read_sample_names_at(&self.dir)?;
+        let df = DfEngine::new(engine.resources())?;
+        Ok(GenoStoreResult {
+            sample_names,
+            store_dir: self.dir.clone(),
+            manifest,
+            engine: df,
+            geno_output_dir: None,
+        })
+    }
+
     pub fn build_or_load(
         &self,
         sources: CohortSources<'_>,
@@ -94,10 +156,6 @@ impl<'a> CohortHandle<'a> {
         let BuildOpts { staging_dir, rebuild, probe: probe_result } = opts;
         let res = engine.resources();
 
-        // Cohort-build session is intentionally distinct from `engine.df()`.
-        // The annotation join registers temp tables (`_ann`, `_genotypes`)
-        // that would collide with the long-lived pipeline session, and the
-        // fresh session keeps row-order/partitioning identical to legacy.
         if let Some(manifest) = probe_result.manifest {
             out.status(&format!(
                 "Using cached genotype store ({} variants x {} samples)",
@@ -136,7 +194,6 @@ impl<'a> CohortHandle<'a> {
         out.status("  Joining genotypes with annotations...");
         let df = run_annotation_join(annotations, &geno, res)?;
 
-        // Deduplicate: same (chromosome, position, ref, alt) from multi-allelic splits or overlapping VCFs.
         let dup_count = df.query_scalar(&column::dedup_count_sql())?;
         if dup_count > 0 {
             out.warn(&format!(

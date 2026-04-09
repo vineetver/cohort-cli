@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde_json::json;
 
@@ -9,7 +10,6 @@ use crate::error::CohortError;
 use crate::output::Output;
 use crate::output::OutputMode;
 use crate::resource::Resources;
-use crate::tui;
 
 pub fn init(
     path: Option<PathBuf>,
@@ -221,17 +221,14 @@ WHERE e.tissue_name LIKE '%Liver%';
 
 pub fn setup(
     output: &dyn Output,
-    mode: &OutputMode,
+    cli_root: PathBuf,
+    cli_tier: String,
+    cli_packs: Vec<String>,
     cli_environment: Option<String>,
     cli_memory_budget: Option<String>,
 ) -> Result<(), CohortError> {
-    if mode.is_machine() {
-        return Err(CohortError::Input(
-            "setup requires interactive mode — run without --format json".to_string(),
-        ));
-    }
-
-    let initial_env = match &cli_environment {
+    let tier = Tier::from_str(&cli_tier)?;
+    let environment = match &cli_environment {
         Some(s) => Some(s.parse::<Environment>()?),
         None => None,
     };
@@ -243,19 +240,34 @@ pub fn setup(
         }
     }
 
-    let outcome = match tui::run_setup_only(initial_env, cli_memory_budget.clone())? {
-        Some(o) => o,
-        None => {
-            output.warn("Setup cancelled");
-            return Ok(());
-        }
+    // Resolve root absolutely so the saved config doesn't depend on cwd.
+    let root = if cli_root.is_absolute() {
+        cli_root
+    } else {
+        std::env::current_dir()
+            .map_err(|e| CohortError::Resource(format!("Cannot determine cwd: {e}")))?
+            .join(cli_root)
     };
+    std::fs::create_dir_all(&root).map_err(|e| {
+        CohortError::Resource(format!(
+            "Cannot create root '{}': {e}",
+            root.display()
+        ))
+    })?;
 
-    let tier = outcome.tier;
-    let root = outcome.root_dir;
-    let selected_packs = outcome.packs;
-    let environment = outcome.environment;
-    let memory_budget = outcome.memory_budget;
+    // Validate every requested pack id against the registry up front so the
+    // download loop doesn't half-finish on a typo.
+    let valid_pack_ids: Vec<&'static str> = Pack::all().iter().map(|p| p.id).collect();
+    for pack in &cli_packs {
+        if !valid_pack_ids.contains(&pack.as_str()) {
+            return Err(CohortError::Input(format!(
+                "Unknown pack '{pack}'. Available: {}",
+                valid_pack_ids.join(", ")
+            )));
+        }
+    }
+    let selected_packs = cli_packs;
+    let memory_budget = cli_memory_budget;
 
     if environment == Some(Environment::Hpc) {
         let has_srun = std::process::Command::new("which")

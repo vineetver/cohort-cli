@@ -1,21 +1,9 @@
 //! Canonical column identifiers for the COHORT pipeline.
-//!
-//! Every column the pipeline touches has a canonical identity defined here.
-//! No string literal column name should appear anywhere else in the codebase
-//! for columns in the `_rare_all` table, variant store, or result output.
-//!
-//! Rename a column? Change one match arm. Forget a column? The compiler tells
-//! you (non-exhaustive match).
-
-/// Canonical column identifier for the COHORT pipeline.
-///
-/// Every column produced, consumed, or joined across pipeline stages has exactly
-/// one `Col` variant. SQL generation, schema definitions, and result writing all
-/// derive column names from this enum — never from string literals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Col {
     Chromosome,
     Position,
+    EndPosition,
     RefAllele,
     AltAllele,
 
@@ -50,12 +38,11 @@ pub enum Col {
 }
 
 impl Col {
-    /// The canonical string name used in parquet schemas, SQL, and the
-    /// genotype store. This is the single source of truth for column naming.
     pub fn as_str(self) -> &'static str {
         match self {
             Col::Chromosome => "chromosome",
             Col::Position => "position",
+            Col::EndPosition => "end_position",
             Col::RefAllele => "ref_allele",
             Col::AltAllele => "alt_allele",
             Col::Vid => "vid",
@@ -84,8 +71,6 @@ impl Col {
         }
     }
 
-    /// Display name for annotation weight channels, matching STAARpipeline R
-    /// output column naming. Returns `None` for non-weight columns.
     pub fn weight_display_name(self) -> Option<&'static str> {
         match self {
             Col::WCadd => Some("cadd_phred"),
@@ -103,14 +88,10 @@ impl Col {
         }
     }
 
-    /// Array index of this weight column within `AnnotationWeights.0[11]`.
-    /// Returns `None` for non-weight columns.
     pub fn weight_index(self) -> Option<usize> {
         STAAR_WEIGHTS.iter().position(|&c| c == self)
     }
 
-    /// Column name as it appears in FAVOR annotation parquets.
-    /// Returns `None` for columns that don't come from annotations.
     pub fn annotation_name(self) -> Option<&'static str> {
         match self {
             Col::Position => Some("position"),
@@ -129,8 +110,6 @@ impl std::fmt::Display for Col {
     }
 }
 
-/// The 11 STAAR annotation weight columns, in canonical order.
-/// This array is the single source of truth for weight column ordering.
 pub const STAAR_WEIGHTS: [Col; 11] = [
     Col::WCadd,
     Col::WLinsight,
@@ -145,10 +124,9 @@ pub const STAAR_WEIGHTS: [Col; 11] = [
     Col::WApcTf,
 ];
 
-/// Metadata columns in the variant store parquet, in schema order.
-/// This defines the positional column layout for read/write operations.
-pub const STORE_METADATA_COLS: [Col; 13] = [
+pub const STORE_METADATA_COLS: [Col; 14] = [
     Col::Position,
+    Col::EndPosition,
     Col::RefAllele,
     Col::AltAllele,
     Col::Maf,
@@ -163,23 +141,27 @@ pub const STORE_METADATA_COLS: [Col; 13] = [
     Col::IsCcreEnhancer,
 ];
 
-/// All columns in the variant store parquet, in schema order.
-/// 13 metadata columns followed by 11 weight columns = 24 total.
 pub fn store_columns() -> Vec<Col> {
     let mut cols = STORE_METADATA_COLS.to_vec();
     cols.extend_from_slice(&STAAR_WEIGHTS);
     cols
 }
 
-/// A column extracted from FAVOR annotation parquet into the pipeline.
 pub struct AnnotationExtract {
     pub output: Col,
     pub sql: &'static str,
 }
 
-/// Metadata columns extracted from FAVOR annotations via SQL expressions.
-/// Each entry maps a FAVOR annotation access path to a canonical pipeline column.
 pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
+    // 1-based inclusive end. Derived from the annotation table because
+    // FAVOR is the authoritative variant identity in the join. When
+    // FAVOR adds a native end_position field, swap this expression for a
+    // direct column reference — output column name and downstream code
+    // do not change.
+    AnnotationExtract {
+        output: Col::EndPosition,
+        sql: "(a.position + LENGTH(a.ref_vcf) - 1)",
+    },
     AnnotationExtract {
         output: Col::GeneName,
         sql: "COALESCE(a.gencode.genes[1], '')",
@@ -218,16 +200,11 @@ pub static ANNOTATION_EXTRACTS: &[AnnotationExtract] = &[
     },
 ];
 
-/// A STAAR annotation weight formula: annotation source → pipeline weight.
 pub struct WeightFormula {
     pub output: Col,
     pub sql: &'static str,
 }
 
-/// Weight formulas for the 11 STAAR annotation channels.
-/// Each formula transforms a FAVOR annotation column into a [0, 1] weight.
-/// Defined ONCE here — the SQL, output schema, validation, and documentation
-/// all derive from this single source.
 pub static WEIGHT_FORMULAS: &[WeightFormula] = &[
     WeightFormula {
         output: Col::WCadd,
@@ -277,19 +254,9 @@ pub static WEIGHT_FORMULAS: &[WeightFormula] = &[
     },
 ];
 
-/// Generate the annotation join SQL that creates the `_rare_all` table.
-///
-/// The generated SQL:
-/// 1. Joins genotype parquet against FAVOR annotations on (chromosome, position, ref, alt)
-/// 2. Extracts metadata (gene, region, consequence, scores)
-/// 3. Computes 11 STAAR annotation weights from source columns
-/// 4. Filters to non-monomorphic variants (MAF > 0)
-///
-/// Every column name and formula derives from the typed definitions above.
 pub fn annotation_join_sql() -> String {
     let mut select_parts: Vec<String> = Vec::new();
 
-    // Variant identity from genotype parquet
     select_parts.push(format!(
         "CAST(g.chromosome AS VARCHAR) AS {}",
         Col::Chromosome
@@ -299,12 +266,10 @@ pub fn annotation_join_sql() -> String {
     select_parts.push(format!("g.alt AS {}", Col::AltAllele));
     select_parts.push("g.maf".to_string());
 
-    // Metadata from annotations
     for extract in ANNOTATION_EXTRACTS {
         select_parts.push(format!("{} AS {}", extract.sql, extract.output));
     }
 
-    // Weight formulas
     for formula in WEIGHT_FORMULAS {
         select_parts.push(format!("{} AS {}", formula.sql, formula.output));
     }
@@ -321,7 +286,6 @@ pub fn annotation_join_sql() -> String {
     )
 }
 
-/// Generate a SELECT of all metadata + weight columns for a chromosome.
 pub fn metadata_select_sql(chrom: &str) -> String {
     let cols: Vec<&str> = store_columns().iter().map(|c| c.as_str()).collect();
     format!(
@@ -335,8 +299,6 @@ pub fn metadata_select_sql(chrom: &str) -> String {
     )
 }
 
-/// Generate a SELECT of variant identity + gene columns for sparse_g building,
-/// sorted by (position, ref, alt) for canonical variant_vcf ordering.
 pub fn carrier_metadata_sql(chrom: &str) -> String {
     format!(
         "SELECT {pos}, {ref_a}, {alt_a}, {gene} \
@@ -522,6 +484,7 @@ pub static VARIANT_STORE_CONTRACT: SchemaContract = SchemaContract {
     name: "variant store",
     required: &[
         (Col::Position, ColType::Int32),
+        (Col::EndPosition, ColType::Int32),
         (Col::RefAllele, ColType::Utf8),
         (Col::AltAllele, ColType::Utf8),
         (Col::Maf, ColType::Float64),
@@ -606,7 +569,7 @@ mod tests {
     #[test]
     fn store_columns_complete() {
         let cols = store_columns();
-        assert_eq!(cols.len(), 24); // 13 metadata + 11 weights
+        assert_eq!(cols.len(), 25); // 14 metadata + 11 weights
     }
 
     #[test]

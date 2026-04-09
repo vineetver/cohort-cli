@@ -1,12 +1,4 @@
 //! Store configuration and path resolution.
-//!
-//! One resolver, one precedence order:
-//!
-//! 1. Explicit `--store-path <PATH>` CLI argument, if provided.
-//! 2. `FAVOR_STORE` environment variable, if set and non-empty.
-//! 3. Walk parent directories from cwd looking for an existing
-//!    `.cohort/`. Stops at `$HOME` or filesystem root.
-//! 4. Fall back to `<cwd>/.cohort/` (created lazily by `Store::open`).
 
 use std::path::{Path, PathBuf};
 
@@ -31,8 +23,6 @@ impl StoreConfig {
     }
 }
 
-/// Pure resolver — takes the cwd and env var explicitly so tests can
-/// drive every arm without mutating process state.
 pub(crate) fn resolve_store_path_with(
     cli_arg: Option<PathBuf>,
     env: Option<&Path>,
@@ -60,9 +50,6 @@ fn absolutize(p: PathBuf, cwd: &Path) -> PathBuf {
     }
 }
 
-/// Walk from `start` upward looking for an existing `.cohort/` dir.
-/// Stops at `$HOME` (inclusive) or filesystem root. Returns the
-/// `.cohort/` path itself, not the parent.
 fn walk_parents_for_store(start: &Path) -> Option<PathBuf> {
     let home = dirs::home_dir();
     let mut cur: Option<&Path> = Some(start);

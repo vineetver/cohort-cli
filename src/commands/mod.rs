@@ -15,8 +15,6 @@ use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::MaskCategory;
 
-/// Parse `--masks` strings into the typed enum. Shared between
-/// `cohort staar` and `cohort meta-staar` so the accepted set stays in sync.
 pub fn parse_mask_categories(masks: &[String]) -> Result<Vec<MaskCategory>, CohortError> {
     masks
         .iter()
@@ -35,6 +33,41 @@ pub struct IngestConfig {
     pub output: PathBuf,
     pub emit_sql: bool,
     pub build_override: Option<crate::cli::GenomeBuild>,
+    pub annotations: Option<PathBuf>,
+    pub cohort_id: Option<String>,
+    pub rebuild: bool,
+}
+
+pub fn derive_cohort_id(genotypes: &Path) -> String {
+    let stem = genotypes
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("cohort");
+    let stem = stem
+        .strip_suffix(".vcf.gz")
+        .or_else(|| stem.strip_suffix(".vcf.bgz"))
+        .or_else(|| stem.strip_suffix(".vcf"))
+        .or_else(|| stem.strip_suffix(".bcf"))
+        .unwrap_or(stem);
+    let mut out = String::with_capacity(stem.len());
+    let mut last_underscore = false;
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_underscore = false;
+        } else if !last_underscore && !out.is_empty() {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "cohort".into()
+    } else {
+        out
+    }
 }
 
 pub struct AnnotateConfig {
@@ -76,7 +109,6 @@ pub struct MemoryEstimate {
 }
 
 impl MemoryEstimate {
-    /// Default estimate: engine will spill to disk if needed.
     pub fn default_estimate() -> Self {
         Self {
             minimum: "4G".into(),

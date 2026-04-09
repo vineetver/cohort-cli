@@ -16,7 +16,6 @@ mod store;
 #[cfg(test)]
 mod test_fixtures;
 mod setup;
-mod tui;
 mod types;
 
 use cli::{Cli, Command};
@@ -49,26 +48,42 @@ fn run(
     mode: &OutputMode,
     dry_run: bool,
 ) -> Result<(), CohortError> {
-    let command = match command {
-        Some(c) => c,
-        None => {
-            let cwd = std::env::current_dir().map_err(|e| {
-                CohortError::Resource(format!("Cannot determine current directory: {e}"))
-            })?;
-            return tui::run(cwd, out, mode);
-        }
-    };
+    let command = command.ok_or_else(|| {
+        CohortError::Input(
+            "No command given. Run `cohort --help` to see available commands.".into(),
+        )
+    })?;
     match command {
         Command::Init { path, force } => setup::init(path, force, out, mode),
-        Command::Setup { environment, memory_budget } => {
-            setup::setup(out, mode, environment, memory_budget)
-        }
+        Command::Setup {
+            root,
+            tier,
+            packs,
+            environment,
+            memory_budget,
+        } => setup::setup(out, root, tier, packs, environment, memory_budget),
         Command::Data { action } => data::transfer::run(action, out),
         Command::Uninstall => setup::uninstall(out),
 
-        Command::Ingest { inputs, output, emit_sql, build } => {
+        Command::Ingest {
+            inputs,
+            output,
+            emit_sql,
+            build,
+            annotations,
+            cohort_id,
+            rebuild,
+        } => {
             let engine = runtime::Engine::open_unconfigured(store_path)?;
-            let config = commands::ingest::build_config(inputs, output, emit_sql, build)?;
+            let config = commands::ingest::build_config(
+                inputs,
+                output,
+                emit_sql,
+                build,
+                annotations,
+                cohort_id,
+                rebuild,
+            )?;
             commands::ingest::run_ingest(&engine, &config, out, dry_run)
         }
         Command::Annotate {
@@ -100,6 +115,7 @@ fn run(
         }
         Command::Staar {
             genotypes,
+            cohort,
             phenotype,
             trait_name,
             covariates,
@@ -131,6 +147,7 @@ fn run(
                 &engine,
                 commands::staar::StaarArgs {
                     genotypes,
+                    cohort,
                     phenotype,
                     trait_names: trait_name,
                     covariates,

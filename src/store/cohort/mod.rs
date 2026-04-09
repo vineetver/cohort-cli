@@ -1,19 +1,4 @@
 //! Genotype cohort store: build, cache, probe, and manifest management.
-//!
-//! On first run the store is built from the VCF x annotation join. Subsequent
-//! runs with the same VCF and annotations skip both steps entirely and load
-//! pre-joined data via memory-mapped sparse_g.bin.
-//!
-//! Layout:
-//! ```text
-//! <store_dir>/
-//!   manifest.json
-//!   samples.txt
-//!   chromosome={chr}/
-//!     sparse_g.bin         # sparse genotype matrix (sample_id, variant_vcf) → dosage
-//!     variants.parquet     # aligned metadata vectors, row i = variant_vcf i
-//!     membership.parquet   # (variant_vcf, gene_name) many-to-many
-//! ```
 
 pub mod builder;
 pub mod encoding;
@@ -59,9 +44,7 @@ pub struct ChromInfo {
     pub n_variants: usize,
 }
 
-/// Content-based file fingerprint: SHA-256 of (first 1MB + last 1MB + file size).
-/// Survives path renames and HPC scratch migrations — only invalidates when
-/// actual file content changes.
+/// Content-based fingerprint so cache keys survive path renames.
 fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     use std::io::{Read as IoRead, Seek, SeekFrom};
     const CHUNK: u64 = 1024 * 1024;
@@ -76,14 +59,12 @@ fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     let mut hasher = Sha256::new();
     hasher.update(size.to_le_bytes());
 
-    // First 1MB
     let head = CHUNK.min(size) as usize;
     let mut buf = vec![0u8; head];
     f.read_exact(&mut buf)
         .map_err(|e| CohortError::Resource(format!("read {}: {e}", path.display())))?;
     hasher.update(&buf);
 
-    // Last 1MB (skip if file <= 1MB since it's already fully read)
     if size > CHUNK {
         let tail_start = size.saturating_sub(CHUNK);
         f.seek(SeekFrom::Start(tail_start))
@@ -98,13 +79,11 @@ fn file_content_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     Ok(hasher.finalize().to_vec())
 }
 
-/// For annotation directories, fingerprint the meta.json file.
 fn dir_fingerprint(path: &Path) -> Result<Vec<u8>, CohortError> {
     let meta_path = path.join("meta.json");
     if meta_path.exists() {
         return file_content_fingerprint(&meta_path);
     }
-    // Fallback: hash the directory's own mtime+size (stat only)
     let meta = fs::metadata(path)
         .map_err(|e| CohortError::Resource(format!("stat {}: {e}", path.display())))?;
     let mtime = meta
@@ -131,9 +110,6 @@ pub fn compute_key(vcf_path: &Path, annotations_path: &Path) -> Result<String, C
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Why a `probe()` returned a miss. Surface this in `RunManifest` so
-/// operators can tell "no store on disk" apart from "store exists but
-/// content fingerprint changed" without grepping logs.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProbeReason {
@@ -147,9 +123,7 @@ pub enum ProbeReason {
 
 pub struct StoreProbe {
     pub store_dir: PathBuf,
-    /// `Some` only when a valid, key-matching, fully-materialized store exists.
     pub manifest: Option<CohortManifest>,
-    /// Populated only when `manifest` is `None`.
     pub miss_reason: Option<ProbeReason>,
 }
 
@@ -161,9 +135,6 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
         miss_reason: Some(reason),
     };
 
-    // Finish any in-flight swap from a prior crash before probing. Failures
-    // here fall through to the manifest read so the operator gets a typed
-    // miss reason instead of a swap-cleanup error.
     if let Ok(staging) = staging_path(&store_dir) {
         let _ = finish_interrupted_swap(&staging, &store_dir);
     }
@@ -178,10 +149,10 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
         return miss(ProbeReason::FingerprintFailed);
     };
 
-    if manifest.version != 3 {
+    if manifest.version != 4 {
         return miss(ProbeReason::SchemaVersionMismatch {
             found: manifest.version,
-            expected: 3,
+            expected: 4,
         });
     }
     if manifest.key != key {
@@ -212,7 +183,6 @@ pub fn probe(store_dir: &Path, vcf_path: &Path, annotations_path: &Path) -> Stor
     }
 }
 
-/// Human-friendly summary of a probe miss for `out.status()` and run.json.
 pub fn describe_miss(reason: &ProbeReason) -> String {
     match reason {
         ProbeReason::NoManifest => "no manifest.json on disk".into(),
@@ -282,10 +252,6 @@ pub struct GenoStoreResult {
 }
 
 impl GenoStoreResult {
-    /// Build a `GenotypeResult` view for downstream stages that need a
-    /// sample-list + parquet directory pair (phenotype loading, kinship
-    /// group loading, known-loci joins). Replaces hand-built clones at
-    /// every call site.
     pub fn to_genotype_result(&self) -> crate::staar::genotype::GenotypeResult {
         crate::staar::genotype::GenotypeResult {
             sample_names: self.sample_names.clone(),
@@ -313,8 +279,7 @@ pub fn run_annotation_join(
 
     let ann_vs = VariantSet::open(annotations)?;
 
-    // Check required annotation columns via table schema (not a query —
-    // LIMIT 0 can return zero batches in DataFusion, losing the schema).
+    // Check the table schema directly; LIMIT 0 may return no batches in DataFusion.
     let ann_cols: Vec<String> = {
         engine.register_parquet_dir("_ann_check", ann_vs.root())?;
         let cols = engine.table_columns("_ann_check")?;
@@ -351,7 +316,6 @@ pub fn run_annotation_join(
         &["position", "ref_vcf", "alt_vcf"],
     )?;
 
-    // The store keeps all variants; MAF filtering happens at read time.
     engine.execute(&column::annotation_join_sql())?;
 
     Ok(engine)
@@ -416,7 +380,7 @@ pub fn build(
     }
 
     let manifest = CohortManifest {
-        version: 3,
+        version: 4,
         key,
         n_samples,
         n_variants: total_variants,
@@ -552,10 +516,10 @@ mod tests {
         assert!(describe_miss(&ProbeReason::NoManifest).contains("manifest"));
         assert!(describe_miss(&ProbeReason::ContentKeyChanged).contains("fingerprint"));
         assert!(describe_miss(&ProbeReason::SchemaVersionMismatch {
-            found: 2,
-            expected: 3
+            found: 3,
+            expected: 4
         })
-        .contains("v2"));
+        .contains("v3"));
     }
 
     #[test]

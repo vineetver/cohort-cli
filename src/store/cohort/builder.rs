@@ -1,9 +1,4 @@
 //! Build sparse_g.bin + variants.parquet + membership.parquet from _rare_all.
-//!
-//! Variants are sorted by (position, ref_allele, alt_allele) and assigned
-//! monotonically increasing variant_vcf indices. Gene membership is stored
-//! separately in membership.parquet — the sparse genotype matrix has no
-//! gene concept.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -27,13 +22,25 @@ use crate::error::CohortError;
 use crate::output::Output;
 use super::encoding::*;
 
+/// Look up a typed Arrow array by column name so schema reorderings stay safe.
+fn col_by_name<'a, T: arrow::array::Array + 'static>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a T, CohortError> {
+    let idx = batch.schema().index_of(name).map_err(|_| {
+        CohortError::Resource(format!("_rare_all missing column {name}"))
+    })?;
+    batch.column(idx).as_any().downcast_ref::<T>().ok_or_else(|| {
+        CohortError::Resource(format!("_rare_all column {name} has wrong type"))
+    })
+}
+
 pub struct BuildStats {
     pub n_variants: usize,
     pub n_genes: usize,
     pub total_carriers: u64,
 }
 
-/// A unique variant (deduplicated by position, ref, alt).
 struct UniqueVariant {
     pos: i32,
     ref_a: String,
@@ -51,8 +58,6 @@ pub fn build_chromosome(
 ) -> Result<BuildStats, CohortError> {
     let wide = n_samples > 65535;
 
-    // Query metadata sorted by (position, ref, alt) — canonical variant_vcf ordering.
-    // Gene column is carried for membership.parquet.
     let meta_batches = engine.collect(&column::carrier_metadata_sql(chrom))?;
 
     let str_val = |col: &dyn Array, row: usize| -> String {
@@ -62,7 +67,6 @@ pub fn build_chromosome(
         arrow::util::display::array_value_to_string(col, row).unwrap_or_default()
     };
 
-    // Collect raw rows sorted by (position, ref, alt)
     struct RawRow {
         pos: i32,
         ref_a: String,
@@ -94,9 +98,6 @@ pub fn build_chromosome(
         });
     }
 
-    // Deduplicate by (pos, ref, alt). A variant in multiple genes gets one
-    // variant_vcf but multiple membership rows. Input is already sorted by
-    // (pos, ref, alt) from the SQL ORDER BY.
     let mut unique_variants: Vec<UniqueVariant> = Vec::new();
     for row in &raw_rows {
         if let Some(last) = unique_variants.last_mut() {
@@ -122,7 +123,6 @@ pub fn build_chromosome(
 
     let n_variants = unique_variants.len();
 
-    // Unique positions for genotype IN clause
     let mut unique_pos: Vec<i32> = unique_variants.iter().map(|v| v.pos).collect();
     unique_pos.sort_unstable();
     unique_pos.dedup();
@@ -132,7 +132,6 @@ pub fn build_chromosome(
         .collect::<Vec<_>>()
         .join(",");
 
-    // Load genotype dosages
     engine.register_parquet_file("_geno_carrier", Path::new(geno_parquet_path))?;
     let dos_batches = engine.collect(&format!(
         "SELECT position, \"ref\", alt, dosages \
@@ -195,7 +194,6 @@ pub fn build_chromosome(
         .map_err(|e| CohortError::Resource(format!("Create sparse_g.bin: {e}")))?;
     let mut w = BufWriter::with_capacity(4 * 1024 * 1024, file);
 
-    // Header is rewritten at the end with correct totals once data is laid out.
     let placeholder = SparseGHeader::new(n_samples as u32, n_variants as u32, 0, 0);
     placeholder.write_to(&mut w)?;
 
@@ -321,11 +319,12 @@ fn write_variants_parquet(
     chrom: &str,
     unique_variants: &[UniqueVariant],
 ) -> Result<(), CohortError> {
-    use arrow::array::{BooleanArray, Float32Array};
+    use arrow::array::BooleanArray;
 
     // (pos, ref, alt) → first batch row. The query is already sorted by
     // (pos, ref, alt) so the first hit is the canonical row.
     struct MetaRow {
+        end_position: i32,
         maf: f64,
         #[allow(dead_code)]
         gene: String,
@@ -340,64 +339,50 @@ fn write_variants_parquet(
         weights: [f64; 11],
     }
 
-    let float_val = |col: &dyn Array, row: usize| -> f64 {
-        if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
-            a.value(row)
-        } else if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
-            a.value(row) as f64
-        } else {
-            0.0
-        }
-    };
-    let str_val = |col: &dyn Array, row: usize| -> String {
-        if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            return a.value(row).to_string();
-        }
-        arrow::util::display::array_value_to_string(col, row).unwrap_or_default()
-    };
-
     let mut meta_map: HashMap<(i32, String, String), MetaRow> = HashMap::new();
     for batch in full_batches {
-        let pos_arr = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let bool_col = |i: usize| {
-            batch
-                .column(i)
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .unwrap()
-        };
-        let cps = bool_col(9);
-        let ces = bool_col(10);
-        let crps = bool_col(11);
-        let cres = bool_col(12);
+        let pos_arr = col_by_name::<Int32Array>(batch, Col::Position.as_str())?;
+        let end_arr = col_by_name::<Int32Array>(batch, Col::EndPosition.as_str())?;
+        let ref_arr = col_by_name::<StringArray>(batch, Col::RefAllele.as_str())?;
+        let alt_arr = col_by_name::<StringArray>(batch, Col::AltAllele.as_str())?;
+        let maf_arr = col_by_name::<Float64Array>(batch, Col::Maf.as_str())?;
+        let gene_arr = col_by_name::<StringArray>(batch, Col::GeneName.as_str())?;
+        let rt_arr = col_by_name::<StringArray>(batch, Col::RegionType.as_str())?;
+        let csq_arr = col_by_name::<StringArray>(batch, Col::Consequence.as_str())?;
+        let cadd_arr = col_by_name::<Float64Array>(batch, Col::CaddPhred.as_str())?;
+        let revel_arr = col_by_name::<Float64Array>(batch, Col::Revel.as_str())?;
+        let cps = col_by_name::<BooleanArray>(batch, Col::IsCagePromoter.as_str())?;
+        let ces = col_by_name::<BooleanArray>(batch, Col::IsCageEnhancer.as_str())?;
+        let crps = col_by_name::<BooleanArray>(batch, Col::IsCcrePromoter.as_str())?;
+        let cres = col_by_name::<BooleanArray>(batch, Col::IsCcreEnhancer.as_str())?;
+        let w_arrs: Vec<&Float64Array> = STAAR_WEIGHTS
+            .iter()
+            .map(|c| col_by_name::<Float64Array>(batch, c.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
 
         for i in 0..batch.num_rows() {
             let key = (
                 pos_arr.value(i),
-                str_val(batch.column(1).as_ref(), i),
-                str_val(batch.column(2).as_ref(), i),
+                ref_arr.value(i).to_string(),
+                alt_arr.value(i).to_string(),
             );
             if meta_map.contains_key(&key) {
                 continue;
             } // keep first
             let mut w = [0.0f64; 11];
-            #[allow(clippy::needless_range_loop)]
-            for ch in 0..11 {
-                w[ch] = float_val(batch.column(13 + ch).as_ref(), i);
+            for (ch, wa) in w_arrs.iter().enumerate() {
+                w[ch] = wa.value(i);
             }
             meta_map.insert(
                 key,
                 MetaRow {
-                    maf: float_val(batch.column(3).as_ref(), i),
-                    gene: str_val(batch.column(4).as_ref(), i),
-                    region_type: str_val(batch.column(5).as_ref(), i),
-                    consequence: str_val(batch.column(6).as_ref(), i),
-                    cadd_phred: float_val(batch.column(7).as_ref(), i),
-                    revel: float_val(batch.column(8).as_ref(), i),
+                    end_position: end_arr.value(i),
+                    maf: maf_arr.value(i),
+                    gene: gene_arr.value(i).to_string(),
+                    region_type: rt_arr.value(i).to_string(),
+                    consequence: csq_arr.value(i).to_string(),
+                    cadd_phred: cadd_arr.value(i),
+                    revel: revel_arr.value(i),
                     cage_prom: cps.value(i),
                     cage_enh: ces.value(i),
                     ccre_prom: crps.value(i),
@@ -411,6 +396,7 @@ fn write_variants_parquet(
     let n = unique_variants.len();
     let mut vvcf_b = UInt32Builder::with_capacity(n);
     let mut pos_b = Int32Builder::with_capacity(n);
+    let mut end_b = Int32Builder::with_capacity(n);
     let mut ref_b = StringBuilder::with_capacity(n, n * 4);
     let mut alt_b = StringBuilder::with_capacity(n, n * 4);
     let mut vid_b = StringBuilder::with_capacity(n, n * 20);
@@ -442,6 +428,7 @@ fn write_variants_parquet(
         ));
 
         if let Some(m) = mr {
+            end_b.append_value(m.end_position);
             maf_b.append_value(m.maf);
             rt_b.append_value(&m.region_type);
             csq_b.append_value(&m.consequence);
@@ -455,6 +442,7 @@ fn write_variants_parquet(
                 wb.append_value(m.weights[ch]);
             }
         } else {
+            end_b.append_value(uv.pos + uv.ref_a.len() as i32 - 1);
             maf_b.append_value(0.0);
             rt_b.append_value("");
             csq_b.append_value("");
@@ -473,6 +461,7 @@ fn write_variants_parquet(
     let mut fields = vec![
         Field::new(Col::VariantVcf.as_str(), DataType::UInt32, false),
         Field::new(Col::Position.as_str(), DataType::Int32, false),
+        Field::new(Col::EndPosition.as_str(), DataType::Int32, false),
         Field::new(Col::RefAllele.as_str(), DataType::Utf8, false),
         Field::new(Col::AltAllele.as_str(), DataType::Utf8, false),
         Field::new(Col::Vid.as_str(), DataType::Utf8, false),
@@ -494,6 +483,7 @@ fn write_variants_parquet(
     let mut columns: Vec<ArrayRef> = vec![
         Arc::new(vvcf_b.finish()),
         Arc::new(pos_b.finish()),
+        Arc::new(end_b.finish()),
         Arc::new(ref_b.finish()),
         Arc::new(alt_b.finish()),
         Arc::new(vid_b.finish()),
