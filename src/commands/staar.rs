@@ -77,6 +77,53 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         ));
     }
 
+    // Multi-trait dispatch. Joint MultiSTAAR covers unrelated continuous
+    // traits with a shared covariate matrix; everything else (kinship-aware
+    // joint null, SPA for binary, AI-STAAR ancestry weighting, sumstats
+    // dump) is a separate track. Reject the combinations at config-build
+    // time so the pipeline never sees an invalid state.
+    let multi_trait = args.trait_names.len() > 1;
+    if multi_trait {
+        let n_traits = args.trait_names.len();
+        let reject = |flag: &str, why: &str| {
+            CohortError::Input(format!(
+                "--trait-name carries {n_traits} traits (multi-trait joint STAAR), \
+                 which is incompatible with {flag}: {why}"
+            ))
+        };
+        if args.spa {
+            return Err(reject(
+                "--spa",
+                "SPA applies to binary traits; joint MultiSTAAR is unrelated continuous only",
+            ));
+        }
+        if blank_to_none(args.ancestry_col.clone()).is_some() {
+            return Err(reject(
+                "--ancestry-col",
+                "AI-STAAR ancestry weighting has not been composed with the joint multi-trait kernel",
+            ));
+        }
+        if !args.kinship.is_empty() {
+            return Err(reject(
+                "--kinship",
+                "kinship-aware joint null (fit_null_glmmkin_multi) is not yet implemented; \
+                 the current path assumes unrelated samples",
+            ));
+        }
+        if blank_to_none(args.kinship_groups.clone()).is_some() {
+            return Err(reject(
+                "--kinship-groups",
+                "kinship-aware joint null is not yet implemented",
+            ));
+        }
+        if args.emit_sumstats {
+            return Err(reject(
+                "--emit-sumstats",
+                "MetaSTAAR sumstats are single-trait; run each trait separately to dump U/K",
+            ));
+        }
+    }
+
     let cohort_name = blank_to_none(args.cohort.clone());
     let (cohort_source, cohort_id, output_dir) = match cohort_name {
         Some(id) => {
@@ -190,7 +237,9 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         kinship: args.kinship,
         kinship_groups: blank_to_none(args.kinship_groups),
         known_loci: args.known_loci,
-        run_mode: if args.emit_sumstats {
+        run_mode: if multi_trait {
+            RunMode::MultiTrait
+        } else if args.emit_sumstats {
             RunMode::EmitSumstats
         } else {
             RunMode::Analyze
@@ -484,5 +533,114 @@ mod tests {
     #[test]
     fn staar_runtime_minimum_floor() {
         assert_eq!(staar_runtime_seconds(0, 0, 8, false), 60);
+    }
+
+    /// Baseline `StaarArgs` with a real-on-disk phenotype file and a
+    /// pre-built cohort source. Covers the minimum set of fields every
+    /// multi-trait conflict test wants to override.
+    ///
+    /// `--cohort <id>` picks the `Existing` path so the fixture does not
+    /// need a VCF or annotation directory — the multi-trait conflict block
+    /// runs before the cohort branch, which is what we want to exercise.
+    fn multi_trait_args(pheno_path: PathBuf, traits: &[&str]) -> StaarArgs {
+        StaarArgs {
+            genotypes: None,
+            cohort: Some("dummy".into()),
+            phenotype: pheno_path,
+            trait_names: traits.iter().map(|s| (*s).into()).collect(),
+            covariates: vec!["age".into(), "sex".into()],
+            annotations: None,
+            masks: vec!["coding".into()],
+            maf_cutoff: 0.01,
+            window_size: 2000,
+            individual: false,
+            spa: false,
+            ancestry_col: None,
+            ai_base_tests: 5,
+            ai_seed: 7590,
+            scang_lmin: 40,
+            scang_lmax: 300,
+            scang_step: 10,
+            kinship: Vec::new(),
+            kinship_groups: None,
+            known_loci: None,
+            emit_sumstats: false,
+            rebuild_store: false,
+            column_map: Vec::new(),
+            output_path: None,
+            cohort_id: None,
+        }
+    }
+
+    fn pheno_file() -> tempfile::NamedTempFile {
+        tempfile::NamedTempFile::new().expect("create temp phenotype file")
+    }
+
+    fn assert_input_error_mentions(result: Result<StaarConfig, CohortError>, needle: &str) {
+        match result {
+            Ok(_) => panic!("expected Input error mentioning {needle:?}, got Ok"),
+            Err(CohortError::Input(msg)) => assert!(
+                msg.contains(needle),
+                "expected error mentioning {needle:?}, got: {msg}"
+            ),
+            Err(other) => panic!("expected Input error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_trait_activates_when_two_traits() {
+        let pheno = pheno_file();
+        let args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
+        let cfg = build_config(args).expect("multi-trait alone should be accepted");
+        assert_eq!(cfg.run_mode, RunMode::MultiTrait);
+        assert_eq!(cfg.trait_names, vec!["BMI".to_string(), "HEIGHT".into()]);
+    }
+
+    #[test]
+    fn single_trait_stays_analyze() {
+        let pheno = pheno_file();
+        let args = multi_trait_args(pheno.path().to_path_buf(), &["BMI"]);
+        let cfg = build_config(args).expect("single-trait baseline should be accepted");
+        assert_eq!(cfg.run_mode, RunMode::Analyze);
+    }
+
+    #[test]
+    fn multi_trait_rejects_spa() {
+        let pheno = pheno_file();
+        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
+        args.spa = true;
+        assert_input_error_mentions(build_config(args), "--spa");
+    }
+
+    #[test]
+    fn multi_trait_rejects_ancestry_col() {
+        let pheno = pheno_file();
+        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
+        args.ancestry_col = Some("super_population".into());
+        assert_input_error_mentions(build_config(args), "--ancestry-col");
+    }
+
+    #[test]
+    fn multi_trait_rejects_kinship() {
+        let pheno = pheno_file();
+        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
+        args.kinship = vec![PathBuf::from("/no/such/kin.tsv")];
+        assert_input_error_mentions(build_config(args), "--kinship");
+    }
+
+    #[test]
+    fn multi_trait_rejects_kinship_groups() {
+        let pheno = pheno_file();
+        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
+        args.kinship_groups = Some("ancestry".into());
+        assert_input_error_mentions(build_config(args), "--kinship-groups");
+    }
+
+    #[test]
+    fn multi_trait_rejects_emit_sumstats() {
+        let pheno = pheno_file();
+        let mut args = multi_trait_args(pheno.path().to_path_buf(), &["BMI", "HEIGHT"]);
+        args.emit_sumstats = true;
+        assert_input_error_mentions(build_config(args), "--emit-sumstats");
     }
 }

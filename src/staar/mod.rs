@@ -28,10 +28,15 @@ pub enum TraitType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
-    /// Full STAAR analysis: score tests, omnibus, results, report.
+    /// Full single-trait STAAR analysis: score tests, omnibus, results, report.
     Analyze,
     /// Stop after the null model and dump per-variant U/K for MetaSTAAR.
     EmitSumstats,
+    /// Joint multi-trait STAAR for unrelated continuous traits with shared
+    /// covariates. Activated when `--trait-name` carries more than one name.
+    /// Rejects `--spa`, `--ancestry-col`, `--kinship`, and `--emit-sumstats`
+    /// at config build time; kinship-aware joint nulls are a separate track.
+    MultiTrait,
 }
 
 /// Per-gene scoring backend chosen for this run.

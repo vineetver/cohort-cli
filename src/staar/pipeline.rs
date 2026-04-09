@@ -248,6 +248,21 @@ impl<'a> StaarPipeline<'a> {
 
         let pheno = self.stage(Stage::LoadPhenotype, |p| p.stage_load_phenotype(&store))?;
 
+        // Multi-trait path diverges before the single-trait null fit: the
+        // score cache, AnalysisVectors, and the per-gene scoring kernels
+        // are all single-trait shaped. Route it to its own branch so the
+        // single-trait stages below never see a (n × k) Y.
+        match self.config.run_mode {
+            RunMode::Analyze | RunMode::EmitSumstats => {}
+            RunMode::MultiTrait => {
+                return Err(CohortError::Analysis(
+                    "multi-trait joint STAAR is not yet wired through the pipeline; \
+                     run one trait at a time for now"
+                        .into(),
+                ));
+            }
+        }
+
         let null_model = self.stage(Stage::FitNullModel, |p| {
             p.stage_fit_null_model(&pheno, &store)
         })?;
