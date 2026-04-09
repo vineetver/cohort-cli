@@ -12,20 +12,116 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use faer::sparse::Triplet;
 use faer::Mat;
 
 use crate::engine::DfEngine;
 use crate::error::CohortError;
 use crate::output::Output;
 use crate::staar::genotype::GenotypeResult;
-use crate::staar::kinship::types::{GroupPartition, KinshipMatrix};
+use crate::staar::kinship::types::{
+    GroupPartition, KinshipMatrix, DENSE_DENSITY_THRESHOLD,
+};
+
+/// Parsed rows from one kinship TSV: symmetric triplet list, the count
+/// of distinct off-diagonal pairs, and how many rows referenced samples
+/// outside the genotype set. Shared by the sparse-direct and dense-
+/// replay branches of `load_kinship`.
+struct ParsedKinship {
+    triplets: Vec<Triplet<u32, u32, f64>>,
+    n_off_diag: usize,
+    n_skipped: usize,
+}
+
+/// Parse a 3-column kinship TSV into a symmetric triplet list plus the
+/// default-to-1 diagonal fill. Header detection, comment skip, and
+/// sample-not-in-set handling match the original dense loader; only
+/// the storage target (triplets vs dense `Mat`) is new.
+fn parse_kinship_triplets(
+    content: &str,
+    path: &Path,
+    id_to_idx: &HashMap<&str, usize>,
+    n: usize,
+) -> Result<ParsedKinship, CohortError> {
+    let mut triplets: Vec<Triplet<u32, u32, f64>> = Vec::new();
+    let mut diagonal_set = vec![false; n];
+    let mut n_off_diag = 0usize;
+    let mut n_skipped = 0usize;
+
+    for (line_no, line) in content.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        // Skip header row if value column is non-numeric.
+        if line_no == 0 && parts[2].parse::<f64>().is_err() {
+            continue;
+        }
+        let val: f64 = parts[2].parse().map_err(|_| {
+            CohortError::Input(format!(
+                "Kinship file '{}' line {}: cannot parse value '{}'",
+                path.display(),
+                line_no + 1,
+                parts[2]
+            ))
+        })?;
+        let (Some(&idx_i), Some(&idx_j)) = (id_to_idx.get(parts[0]), id_to_idx.get(parts[1]))
+        else {
+            n_skipped += 1;
+            continue;
+        };
+        let ri = idx_i as u32;
+        let rj = idx_j as u32;
+        if idx_i == idx_j {
+            diagonal_set[idx_i] = true;
+            triplets.push(Triplet::new(ri, ri, val));
+        } else {
+            // Symmetric entries: push both halves so the triplet list is
+            // a full-storage representation of the symmetric matrix.
+            triplets.push(Triplet::new(ri, rj, val));
+            triplets.push(Triplet::new(rj, ri, val));
+            n_off_diag += 1;
+        }
+    }
+
+    // Default-fill any diagonal the TSV didn't set. Matches the old
+    // dense loader which pre-zeroed then wrote 1.0 on every diagonal
+    // before parsing the file.
+    for i in 0..n {
+        if !diagonal_set[i] {
+            triplets.push(Triplet::new(i as u32, i as u32, 1.0));
+        }
+    }
+
+    Ok(ParsedKinship {
+        triplets,
+        n_off_diag,
+        n_skipped,
+    })
+}
 
 /// Read kinship matrices from one or more 3-column TSV files
-/// (`sample_i  sample_j  kinship`). Reorders to `sample_order` and validates
-/// every sample appears at least on the diagonal of each loaded matrix.
-/// Returns one [`KinshipMatrix`] per input path; the constructor enforces
-/// symmetry, finiteness, and density-based routing to dense or sparse
-/// storage.
+/// (`sample_i  sample_j  kinship`). Reorders to `sample_order` and
+/// validates every sample appears at least on the diagonal of each
+/// loaded matrix.
+///
+/// Parses each file once into a symmetric triplet list, then picks the
+/// storage variant from the measured density:
+///
+/// * density < `DENSE_DENSITY_THRESHOLD` → `KinshipMatrix::from_triplets`
+///   builds a sparse CSC directly. Never touches a dense `Mat`, so a
+///   pedigree with n = 50 000 samples and ~5 off-diagonal entries per
+///   individual occupies ~3 MB instead of the ~20 GB staging buffer the
+///   old dense-first path tried to allocate before the budget check.
+/// * density ≥ threshold → allocate `Mat::<f64>::zeros(n, n)`, replay
+///   the triplets, and call `KinshipMatrix::new`. The dense working set
+///   is gated by the AI-REML memory budget in `kinship::budget`.
+///
+/// Both branches share the same parse pass so the header / comment /
+/// default-diagonal / sample-not-in-set edge cases cannot drift.
 pub fn load_kinship(
     paths: &[PathBuf],
     sample_order: &[String],
@@ -52,52 +148,30 @@ pub fn load_kinship(
             ))
         })?;
 
-        // Stage as dense first; KinshipMatrix::new will down-convert to
-        // sparse storage if the density falls below the threshold.
-        let mut k = Mat::<f64>::zeros(n, n);
-        for i in 0..n {
-            k[(i, i)] = 1.0;
-        }
-        let mut n_off_diag = 0usize;
-        let mut n_skipped = 0usize;
-        for (line_no, line) in content.lines().enumerate() {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            // Skip header row if value column is non-numeric.
-            if line_no == 0 && parts[2].parse::<f64>().is_err() {
-                continue;
-            }
-            let s_i = parts[0];
-            let s_j = parts[1];
-            let val: f64 = parts[2].parse().map_err(|_| {
-                CohortError::Input(format!(
-                    "Kinship file '{}' line {}: cannot parse value '{}'",
-                    path.display(),
-                    line_no + 1,
-                    parts[2]
-                ))
-            })?;
-            let (Some(&idx_i), Some(&idx_j)) = (id_to_idx.get(s_i), id_to_idx.get(s_j)) else {
-                n_skipped += 1;
-                continue;
-            };
-            k[(idx_i, idx_j)] = val;
-            k[(idx_j, idx_i)] = val;
-            if idx_i != idx_j {
-                n_off_diag += 1;
-            }
-        }
+        let parsed = parse_kinship_triplets(&content, path, &id_to_idx, n)?;
 
         out.status(&format!(
-            "    {label}: {n_off_diag} off-diagonal entries, {n_skipped} entries skipped (sample not in genotype set)"
+            "    {}: {} off-diagonal entries, {} entries skipped (sample not in genotype set)",
+            label, parsed.n_off_diag, parsed.n_skipped,
         ));
 
-        let kin = KinshipMatrix::new(k, label.clone())?;
+        // Density accounts for both halves of every off-diagonal plus
+        // the n diagonal entries we always push.
+        let nnz = n + 2 * parsed.n_off_diag;
+        let density = nnz as f64 / (n as f64 * n as f64);
+
+        let kin = if density < DENSE_DENSITY_THRESHOLD {
+            // Sparse-direct: never materialize n×n.
+            KinshipMatrix::from_triplets(n, parsed.triplets, label.clone())?
+        } else {
+            // Dense replay: budget-bound, will be checked by the REML
+            // dispatcher before the path is actually taken.
+            let mut k = Mat::<f64>::zeros(n, n);
+            for t in &parsed.triplets {
+                k[(t.row as usize, t.col as usize)] = t.val;
+            }
+            KinshipMatrix::new(k, label.clone())?
+        };
         out.status(&format!(
             "    {label} stored as {}",
             if kin.is_sparse() { "sparse CSC" } else { "dense" }
@@ -324,5 +398,43 @@ mod tests {
         assert_eq!(kins[1].label(), "b");
         assert_eq!(kins[0].as_dense().unwrap()[(0, 1)], 0.4);
         assert_eq!(kins[1].as_dense().unwrap()[(0, 1)], 0.1);
+    }
+
+    #[test]
+    fn load_kinship_sparse_pedigree_takes_triplet_path() {
+        // Pedigree fixture: 500 families × 2 sibs (n = 1000), each sib
+        // pair carrying a single 0.5 off-diagonal entry. Overall density
+        // is (1000 + 2·500) / 1_000_000 = 0.002, well under the 0.30
+        // sparse threshold. The triplet-first loader must route this
+        // straight into the sparse variant without ever allocating the
+        // n×n staging matrix. This test would have driven the old loader
+        // through an 8 MB scratch alloc; it now takes the sparse-direct
+        // branch and never builds a Mat::zeros(1000, 1000).
+        let dir = tempfile::tempdir().unwrap();
+        let n_fam = 500;
+        let n = n_fam * 2;
+        let mut body = String::with_capacity(n_fam * 40);
+        let mut order = Vec::with_capacity(n);
+        for f in 0..n_fam {
+            let a = format!("F{f}_A");
+            let b = format!("F{f}_B");
+            body.push_str(&format!("{a}\t{b}\t0.5\n"));
+            order.push(a);
+            order.push(b);
+        }
+        let path = write_tsv(&dir, "ped.tsv", &body);
+        let out = null_output();
+        let kins = load_kinship(&[path], &order, out.as_ref()).unwrap();
+        assert_eq!(kins.len(), 1);
+        let kin = &kins[0];
+        assert!(
+            kin.is_sparse(),
+            "sparse pedigree must take the sparse-direct load path"
+        );
+        assert_eq!(kin.n(), n);
+        let sparse = kin.as_sparse().unwrap();
+        // Each family contributes 2 diagonal + 2 off-diagonal entries.
+        let nnz = sparse.val().len();
+        assert_eq!(nnz, 4 * n_fam, "nnz = {nnz}, expected {}", 4 * n_fam);
     }
 }

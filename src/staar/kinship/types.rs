@@ -28,7 +28,9 @@ use crate::staar::kinship::sparse::SparseFactor;
 const KINSHIP_SYMMETRY_TOL: f64 = 1e-8;
 /// Density threshold above which a loaded kinship matrix gets stored
 /// densely. Below this we keep CSC and route through the sparse path.
-const DENSE_DENSITY_THRESHOLD: f64 = 0.30;
+/// Visible to `super::load` so the triplet-first loader can pick the
+/// storage variant without materializing a dense Mat first.
+pub(super) const DENSE_DENSITY_THRESHOLD: f64 = 0.30;
 
 /// A symmetric, finite, square kinship matrix in either dense or sparse
 /// storage. Both variants are validated by the constructor.
