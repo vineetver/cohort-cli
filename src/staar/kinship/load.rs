@@ -144,7 +144,7 @@ pub fn load_groups(
             })?
     };
 
-    let id_col = cols[0].clone();
+    let id_col = crate::staar::model::resolve_id_column(&cols, column_map);
     let sample_list = geno
         .sample_names
         .iter()

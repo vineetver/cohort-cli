@@ -91,6 +91,7 @@ pub fn extract_genotypes(
         batch: PackedBatchBuilder::new(n_samples, batch_size),
         total_variants: 0,
         chromosomes: Vec::new(),
+        dosages: vec![f32::NAN; n_samples],
     };
 
     let pb = output.progress(0, "extracting genotypes");
@@ -148,6 +149,9 @@ struct ExtractState {
     batch: PackedBatchBuilder,
     total_variants: u64,
     chromosomes: Vec<String>,
+    /// Reusable per-variant dosage buffer. Cleared between records so the
+    /// hot path never allocates.
+    dosages: Vec<f32>,
 }
 
 fn flush(state: &mut ExtractState, schema: &Arc<Schema>) -> Result<(), CohortError> {
@@ -224,12 +228,6 @@ fn process_record(
     let samples_str: &str = samples_raw.as_ref();
     let gt_index = 0; // GT is first FORMAT field by VCF spec
 
-    let sample_fields: Vec<&str> = if samples_str.is_empty() || samples_str == "." {
-        Vec::new()
-    } else {
-        samples_str.split('\t').collect()
-    };
-
     for (alt_idx, alt) in alts.iter().enumerate() {
         let alt_upper = alt.trim().to_uppercase();
         if alt_upper == "*" || alt_upper == "." || alt_upper.is_empty() {
@@ -238,27 +236,37 @@ fn process_record(
 
         let (norm_ref, norm_alt, norm_pos) = parsimony_normalize(&ref_allele, &alt_upper, pos);
 
-        // Parse genotypes — stack buffer, no heap allocation for typical diploid GTs
-        let mut dosages = vec![f32::NAN; n_samples];
+        // Reuse the per-variant dosage buffer; reset to NaN per call so any
+        // VCF row with fewer than n_samples sample fields is treated as
+        // missing for the unset positions.
+        for d in state.dosages.iter_mut() {
+            *d = f32::NAN;
+        }
         let mut ac: f64 = 0.0;
         let mut an: f64 = 0.0;
 
-        for (i, sf) in sample_fields.iter().enumerate().take(n_samples) {
-            let gt = extract_gt_field(sf, gt_index);
-            let dose = gt_to_dosage(gt.as_bytes(), (alt_idx + 1) as u8);
-            dosages[i] = dose;
-            if dose.is_finite() {
-                ac += dose as f64;
-                an += 2.0;
+        if !samples_str.is_empty() && samples_str != "." {
+            for (i, sf) in samples_str.split('\t').enumerate().take(n_samples) {
+                let gt = extract_gt_field(sf, gt_index);
+                let dose = gt_to_dosage(gt.as_bytes(), (alt_idx + 1) as u8);
+                state.dosages[i] = dose;
+                if dose.is_finite() {
+                    ac += dose as f64;
+                    an += 2.0;
+                }
             }
         }
 
         let af = if an > 0.0 { ac / an } else { 0.0 };
         let maf = af.min(1.0 - af) as f32;
 
+        // Disjoint-field borrow: batch and dosages are independent fields
+        // of state, but the call expression `state.batch.push(..., &state.dosages)`
+        // confuses the borrow checker, so split it explicitly.
+        let dosages: &[f32] = &state.dosages;
         state
             .batch
-            .push(chrom, norm_pos, &norm_ref, &norm_alt, maf, &dosages);
+            .push(chrom, norm_pos, &norm_ref, &norm_alt, maf, dosages);
         state.total_variants += 1;
 
         if state.batch.is_full() {

@@ -183,17 +183,6 @@ impl RunManifest {
         }
     }
 
-    /// Most recent stage marked `Failed`, if any. Used by tests today; a
-    /// future `--resume` flag will read it.
-    #[allow(dead_code)]
-    pub fn last_failed_stage(&self) -> Option<Stage> {
-        self.stages
-            .iter()
-            .rev()
-            .find(|r| r.status == StageStatus::Failed)
-            .map(|r| r.stage)
-    }
-
     /// True if this build can read the on-disk `schema_version`.
     pub fn schema_compatible(&self) -> bool {
         self.schema_version == RUN_MANIFEST_VERSION
@@ -463,23 +452,6 @@ mod tests {
         assert_eq!(Stage::ALL.len(), 8);
         assert_eq!(Stage::ALL[0], Stage::Validate);
         assert_eq!(Stage::ALL[Stage::ALL.len() - 1], Stage::WriteResults);
-    }
-
-    #[test]
-    fn run_manifest_last_failed_stage() {
-        let mut m = dummy_manifest();
-        assert_eq!(m.last_failed_stage(), None);
-
-        m.begin(Stage::Validate);
-        m.complete(Stage::Validate);
-        m.begin(Stage::EnsureStore);
-        m.fail(Stage::EnsureStore);
-        assert_eq!(m.last_failed_stage(), Some(Stage::EnsureStore));
-
-        // A subsequent failure replaces the answer.
-        m.begin(Stage::FitNullModel);
-        m.fail(Stage::FitNullModel);
-        assert_eq!(m.last_failed_stage(), Some(Stage::FitNullModel));
     }
 
     #[test]

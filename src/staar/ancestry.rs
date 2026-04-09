@@ -22,20 +22,24 @@ pub struct AncestryInfo {
 
 impl AncestryInfo {
     pub fn new(group: Vec<usize>, n_pops: usize, n_base_tests: usize, seed: u64) -> Self {
+        // Column 0 is the all-ones MAF-only run; columns 1..=B are |N(0,1)|
+        // ensemble weights drawn deterministically from `seed`. The two
+        // weight tables are filled in the same RNG order they were
+        // historically (1_1 first, then 1_25) so the bit pattern of the
+        // resulting STAAR p-values is unchanged.
         let n_cols = n_base_tests + 1;
-        let mut pop_weights_1_1 = vec![vec![1.0; n_cols]; n_pops];
-        let mut pop_weights_1_25 = vec![vec![1.0; n_cols]; n_pops];
         let mut rng = Lcg::new(seed);
-        for k in 0..n_pops {
-            for b in 1..n_cols {
-                pop_weights_1_1[k][b] = rng.next_normal().abs();
+        let mut fill = || {
+            let mut t = vec![vec![1.0; n_cols]; n_pops];
+            for row in t.iter_mut() {
+                for cell in row.iter_mut().skip(1) {
+                    *cell = rng.next_normal().abs();
+                }
             }
-        }
-        for k in 0..n_pops {
-            for b in 1..n_cols {
-                pop_weights_1_25[k][b] = rng.next_normal().abs();
-            }
-        }
+            t
+        };
+        let pop_weights_1_1 = fill();
+        let pop_weights_1_25 = fill();
         Self {
             group,
             n_pops,
