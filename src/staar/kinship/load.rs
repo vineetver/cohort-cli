@@ -195,29 +195,7 @@ pub fn load_groups(
     engine.register_csv("_pheno_groups", phenotype, b'\t')?;
     let cols = engine.table_columns("_pheno_groups")?;
 
-    let resolved = if let Some(mapped) = column_map.get(group_col) {
-        if cols.contains(mapped) {
-            mapped.clone()
-        } else {
-            return Err(CohortError::Input(format!(
-                "Column map '{group_col}={mapped}' but '{mapped}' not in phenotype.",
-            )));
-        }
-    } else if cols.contains(&group_col.to_string()) {
-        group_col.to_string()
-    } else {
-        let lower = group_col.to_lowercase();
-        cols.iter()
-            .find(|c| c.to_lowercase() == lower)
-            .cloned()
-            .ok_or_else(|| {
-                CohortError::Input(format!(
-                    "Group column '{group_col}' not found in phenotype. Available: {}",
-                    cols.join(", ")
-                ))
-            })?
-    };
-
+    let resolved = crate::staar::model::resolve_column(group_col, &cols, column_map, "Group")?;
     let id_col = crate::staar::model::resolve_id_column(&cols, column_map);
     let sample_list = geno
         .sample_names
@@ -236,12 +214,8 @@ pub fn load_groups(
     let mut id_to_label: HashMap<String, String> = HashMap::new();
     for batch in &batches {
         for row in 0..batch.num_rows() {
-            let id =
-                arrow::util::display::array_value_to_string(batch.column(0).as_ref(), row)
-                    .unwrap_or_default();
-            let label =
-                arrow::util::display::array_value_to_string(batch.column(1).as_ref(), row)
-                    .unwrap_or_default();
+            let id = crate::staar::model::arrow_str(batch.column(0).as_ref(), row);
+            let label = crate::staar::model::arrow_str(batch.column(1).as_ref(), row);
             id_to_label.insert(id, label);
         }
     }
