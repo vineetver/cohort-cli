@@ -641,10 +641,12 @@ fn manhattan_traces(genes: &[PlotGene]) -> String {
     let colors = ["#4361ee", "#7f8fa6"];
     let mut traces = Vec::new();
 
-    // Deduplicate genes across masks: keep best p-value per gene
-    let mut best: HashMap<String, &PlotGene> = HashMap::new();
+    // Deduplicate genes across masks: keep best p-value per gene. Tuple
+    // key borrows from PlotGene (lives for the whole slice), so the
+    // previous per-gene `format!` allocation is gone.
+    let mut best: HashMap<(&str, &str), &PlotGene> = HashMap::new();
     for g in genes {
-        let key = format!("{}:{}", g.gene, g.chromosome);
+        let key = (g.gene.as_str(), g.chromosome.as_str());
         match best.get(&key) {
             Some(existing) if existing.staar_o <= g.staar_o => {}
             _ => {
@@ -803,10 +805,12 @@ fn qq_traces_per_mask(results: &[(MaskType, Vec<GeneResult>)]) -> String {
 }
 
 fn volcano_trace(genes: &[PlotGene]) -> String {
-    // Deduplicate: best p per gene
-    let mut best: HashMap<String, &PlotGene> = HashMap::new();
+    // Deduplicate: best p per gene. Tuple key borrows from PlotGene —
+    // the gene/chromosome strings live for the whole slice so no
+    // per-gene `format!` allocation.
+    let mut best: HashMap<(&str, &str), &PlotGene> = HashMap::new();
     for g in genes {
-        let key = format!("{}:{}", g.gene, g.chromosome);
+        let key = (g.gene.as_str(), g.chromosome.as_str());
         match best.get(&key) {
             Some(existing) if existing.staar_o <= g.staar_o => {}
             _ => {

@@ -252,8 +252,10 @@ fn tail_prob(q: f64, mu: &[f64], g: &[f64], norm: &Normal) -> f64 {
         }
     };
 
-    let k = cgf(t_hat, mu, g);
-    let k2 = cgf_d2(t_hat, mu, g);
+    // cgf and cgf_d2 share the `(t·gi).exp()` and `(1 − m + m·e)` work
+    // at the same t; fuse into a single pass to halve the iteration cost
+    // at the hot point of `tail_prob`.
+    let (k, k2) = cgf_and_d2(t_hat, mu, g);
     if k2 <= 0.0 {
         return 0.5;
     }
@@ -278,15 +280,6 @@ fn tail_prob(q: f64, mu: &[f64], g: &[f64], norm: &Normal) -> f64 {
 //   K''(t)= Σ μ_i(1-μ_i) g_i² exp(t g_i) / (1 - μ_i + μ_i exp(t g_i))²
 // The -t·μ·g centering ensures K'(0) = 0, matching R's K_Binary_SPA.
 
-fn cgf(t: f64, mu: &[f64], g: &[f64]) -> f64 {
-    mu.iter()
-        .zip(g)
-        .map(|(&m, &gi)| {
-            -t * m * gi + (1.0 - m + m * (t * gi).clamp(-EXP_CLAMP, EXP_CLAMP).exp()).ln()
-        })
-        .sum()
-}
-
 fn cgf_d1(t: f64, mu: &[f64], g: &[f64]) -> f64 {
     mu.iter()
         .zip(g)
@@ -297,15 +290,20 @@ fn cgf_d1(t: f64, mu: &[f64], g: &[f64]) -> f64 {
         .sum()
 }
 
-fn cgf_d2(t: f64, mu: &[f64], g: &[f64]) -> f64 {
-    mu.iter()
-        .zip(g)
-        .map(|(&m, &gi)| {
-            let e = (t * gi).clamp(-EXP_CLAMP, EXP_CLAMP).exp();
-            let d = 1.0 - m + m * e;
-            m * (1.0 - m) * gi * gi * e / (d * d)
-        })
-        .sum()
+/// Fused `K(t)` + `K''(t)` for the hot `tail_prob` call. Returns both
+/// cumulants in a single pass over `(mu, g)`. `cgf_d1` stays separate
+/// because `find_root` calls it ~50 times per gene and would pay the
+/// `k` and `k2` work for nothing on every iteration.
+fn cgf_and_d2(t: f64, mu: &[f64], g: &[f64]) -> (f64, f64) {
+    let mut k = 0.0_f64;
+    let mut k2 = 0.0_f64;
+    for (&m, &gi) in mu.iter().zip(g) {
+        let e = (t * gi).clamp(-EXP_CLAMP, EXP_CLAMP).exp();
+        let d = 1.0 - m + m * e;
+        k += -t * m * gi + d.ln();
+        k2 += m * (1.0 - m) * gi * gi * e / (d * d);
+    }
+    (k, k2)
 }
 
 /// Bisection root-finding for K'(t*) = q.
@@ -494,7 +492,8 @@ mod tests {
     fn cgf_at_zero_is_zero() {
         let mu = vec![0.5, 0.3, 0.8];
         let g = vec![1.0, 0.0, 2.0];
-        assert!(cgf(0.0, &mu, &g).abs() < 1e-12);
+        let (k, _) = cgf_and_d2(0.0, &mu, &g);
+        assert!(k.abs() < 1e-12);
     }
 
     #[test]
@@ -517,7 +516,8 @@ mod tests {
             .zip(&g)
             .map(|(m, gi)| m * (1.0 - m) * gi * gi)
             .sum();
-        assert!((cgf_d2(0.0, &mu, &g) - expected).abs() < 1e-12);
+        let (_, k2) = cgf_and_d2(0.0, &mu, &g);
+        assert!((k2 - expected).abs() < 1e-12);
     }
 
     #[test]

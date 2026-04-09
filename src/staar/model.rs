@@ -67,6 +67,29 @@ fn resolve_column(
     )))
 }
 
+/// Intern an iterator of categorical labels into `(order, assignments)`
+/// where `order` is the de-duplicated label list in first-seen order and
+/// `assignments[i]` is the index of the i-th label in `order`. Shared
+/// between `load_phenotype`'s ancestry path and
+/// `kinship::load::load_groups`' group partition.
+pub(crate) fn intern_labels<'a, I: IntoIterator<Item = &'a str>>(
+    labels: I,
+) -> (Vec<String>, Vec<usize>) {
+    let mut order: Vec<String> = Vec::new();
+    let mut assignments: Vec<usize> = Vec::new();
+    for label in labels {
+        let idx = order
+            .iter()
+            .position(|l| l == label)
+            .unwrap_or_else(|| {
+                order.push(label.to_string());
+                order.len() - 1
+            });
+        assignments.push(idx);
+    }
+    (order, assignments)
+}
+
 pub(crate) fn resolve_id_column(
     actual_cols: &[String],
     column_map: &HashMap<String, String>,
@@ -283,15 +306,8 @@ pub fn load_phenotype(
                      Remove or impute before running --ancestry-col."
                 )));
             }
-            let mut order: Vec<String> = Vec::new();
-            let mut group: Vec<usize> = Vec::with_capacity(n);
-            for label in pop_labels.iter().flatten() {
-                let idx = order.iter().position(|l| l == label).unwrap_or_else(|| {
-                    order.push(label.clone());
-                    order.len() - 1
-                });
-                group.push(idx);
-            }
+            let (order, group) =
+                intern_labels(pop_labels.iter().flatten().map(|s| s.as_str()));
             if order.len() < 2 {
                 return Err(CohortError::Input(format!(
                     "Ancestry column '{col}' has only {} distinct value(s); \

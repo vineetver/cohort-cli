@@ -362,29 +362,14 @@ pub(crate) fn carriers_to_dense(carriers: &[CarrierList], analysis: &AnalysisVec
 }
 
 /// Reconstruct a NullModel from AnalysisVectors for the SPA / AI-STAAR paths.
-/// Uses compact n_pheno-sized arrays.
+/// Uses compact n_pheno-sized arrays. One-shot `Mat::from_fn` construction
+/// avoids the triple element-by-element copy loop that used to run per gene.
 pub(crate) fn null_model_from_analysis(analysis: &AnalysisVectors) -> NullModel {
     let n = analysis.n_pheno;
     let k = analysis.k;
-
-    let mut residuals = Mat::zeros(n, 1);
-    for i in 0..n {
-        residuals[(i, 0)] = analysis.residuals[i];
-    }
-
-    let mut x_matrix = Mat::zeros(n, k);
-    for i in 0..n {
-        for j in 0..k {
-            x_matrix[(i, j)] = analysis.x_row_major[i * k + j];
-        }
-    }
-
-    let mut xtx_inv = Mat::zeros(k, k);
-    for i in 0..k {
-        for j in 0..k {
-            xtx_inv[(i, j)] = analysis.xtx_inv[i * k + j];
-        }
-    }
+    let residuals = Mat::from_fn(n, 1, |i, _| analysis.residuals[i]);
+    let x_matrix = Mat::from_fn(n, k, |i, j| analysis.x_row_major[i * k + j]);
+    let xtx_inv = Mat::from_fn(k, k, |i, j| analysis.xtx_inv[i * k + j]);
 
     NullModel {
         residuals,

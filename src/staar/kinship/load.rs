@@ -185,16 +185,8 @@ pub fn load_groups(
         compact_labels.push(label);
     }
 
-    let mut order: Vec<String> = Vec::new();
-    let mut assignments: Vec<usize> = Vec::with_capacity(compact_labels.len());
-    for label in &compact_labels {
-        let g = order.iter().position(|l| l == label).unwrap_or_else(|| {
-            order.push(label.clone());
-            order.len() - 1
-        });
-        assignments.push(g);
-    }
-
+    let (order, assignments) =
+        crate::staar::model::intern_labels(compact_labels.iter().map(|s| s.as_str()));
     let partition = GroupPartition::from_assignments(&assignments, &order)?;
     out.status(&format!(
         "  Heteroscedastic groups: {} levels ({})",

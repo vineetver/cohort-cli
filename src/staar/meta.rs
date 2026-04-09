@@ -490,26 +490,13 @@ pub fn merge_chromosome(
         for i in 0..n {
             let mut weights = [0.0f64; 11];
             for (ch, wa) in w_arrs.iter().enumerate() {
-                weights[ch] = if wa.is_null(i) { 0.0 } else { wa.value(i) };
+                weights[ch] = f64_or(wa, i, 0.0);
             }
 
-            let segs_str = if segs_arr.is_null(i) {
-                ""
-            } else {
-                segs_arr.value(i)
-            };
-            let study_segments = parse_study_segments(segs_str);
+            let study_segments = parse_study_segments(str_or(segs_arr, i, ""));
 
-            let mac_total = if mac_arr.is_null(i) {
-                0
-            } else {
-                mac_arr.value(i)
-            };
-            let n_total = if n_obs_arr.is_null(i) {
-                0
-            } else {
-                n_obs_arr.value(i)
-            };
+            let mac_total = i64_or(mac_arr, i, 0);
+            let n_total = i64_or(n_obs_arr, i, 0);
             // MAF = MAC / (2*N) — diploid genomes have 2 alleles per sample
             let maf = if n_total > 0 {
                 mac_total as f64 / (2.0 * n_total as f64)
@@ -521,73 +508,25 @@ pub fn merge_chromosome(
                 variant: AnnotatedVariant {
                     chromosome: chrom_parsed,
                     position: pos_arr.value(i) as u32,
-                    ref_allele: if ref_arr.is_null(i) {
-                        "".into()
-                    } else {
-                        ref_arr.value(i).into()
-                    },
-                    alt_allele: if alt_arr.is_null(i) {
-                        "".into()
-                    } else {
-                        alt_arr.value(i).into()
-                    },
+                    ref_allele: str_or(ref_arr, i, "").into(),
+                    alt_allele: str_or(alt_arr, i, "").into(),
                     maf,
-                    gene_name: if gene_arr.is_null(i) {
-                        "".into()
-                    } else {
-                        gene_arr.value(i).into()
-                    },
+                    gene_name: str_or(gene_arr, i, "").into(),
                     annotation: FunctionalAnnotation {
-                        region_type: RegionType::from_str_lossy(if rt_arr.is_null(i) {
-                            ""
-                        } else {
-                            rt_arr.value(i)
-                        }),
-                        consequence: Consequence::from_str_lossy(if csq_arr.is_null(i) {
-                            ""
-                        } else {
-                            csq_arr.value(i)
-                        }),
-                        cadd_phred: if cadd_arr.is_null(i) {
-                            0.0
-                        } else {
-                            cadd_arr.value(i)
-                        },
-                        revel: if revel_arr.is_null(i) {
-                            0.0
-                        } else {
-                            revel_arr.value(i)
-                        },
+                        region_type: RegionType::from_str_lossy(str_or(rt_arr, i, "")),
+                        consequence: Consequence::from_str_lossy(str_or(csq_arr, i, "")),
+                        cadd_phred: f64_or(cadd_arr, i, 0.0),
+                        revel: f64_or(revel_arr, i, 0.0),
                         regulatory: RegulatoryFlags {
-                            cage_promoter: if cp_arr.is_null(i) {
-                                false
-                            } else {
-                                cp_arr.value(i)
-                            },
-                            cage_enhancer: if ce_arr.is_null(i) {
-                                false
-                            } else {
-                                ce_arr.value(i)
-                            },
-                            ccre_promoter: if crp_arr.is_null(i) {
-                                false
-                            } else {
-                                crp_arr.value(i)
-                            },
-                            ccre_enhancer: if cre_arr.is_null(i) {
-                                false
-                            } else {
-                                cre_arr.value(i)
-                            },
+                            cage_promoter: bool_or(cp_arr, i, false),
+                            cage_enhancer: bool_or(ce_arr, i, false),
+                            ccre_promoter: bool_or(crp_arr, i, false),
+                            ccre_enhancer: bool_or(cre_arr, i, false),
                         },
                         weights: AnnotationWeights(weights),
                     },
                 },
-                u_meta: if u_meta_arr.is_null(i) {
-                    0.0
-                } else {
-                    u_meta_arr.value(i)
-                },
+                u_meta: f64_or(u_meta_arr, i, 0.0),
                 mac_total,
                 n_total,
                 study_segments,
@@ -730,6 +669,29 @@ fn unweighted_burden_estimate(u: &Mat<f64>, k: &Mat<f64>) -> (f64, f64) {
         return (f64::NAN, f64::NAN);
     }
     (one_t_u / one_t_k_one, (1.0 / one_t_k_one).sqrt())
+}
+
+/// Small arrow-null unwrap helpers. Replace the
+/// `if arr.is_null(i) { default } else { arr.value(i) }` ternary that
+/// used to repeat ~15 times across `merge_chromosome`'s row loop.
+#[inline]
+fn f64_or(arr: &Float64Array, i: usize, default: f64) -> f64 {
+    if arr.is_null(i) { default } else { arr.value(i) }
+}
+
+#[inline]
+fn i64_or(arr: &Int64Array, i: usize, default: i64) -> i64 {
+    if arr.is_null(i) { default } else { arr.value(i) }
+}
+
+#[inline]
+fn str_or<'a>(arr: &'a StringArray, i: usize, default: &'a str) -> &'a str {
+    if arr.is_null(i) { default } else { arr.value(i) }
+}
+
+#[inline]
+fn bool_or(arr: &BooleanArray, i: usize, default: bool) -> bool {
+    if arr.is_null(i) { default } else { arr.value(i) }
 }
 
 fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {

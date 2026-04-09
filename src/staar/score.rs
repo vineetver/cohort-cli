@@ -47,8 +47,10 @@ pub struct StaarResult {
 /// Run full STAAR analysis for one gene from raw genotypes.
 ///
 /// Computes U = G'r and K = G'(I-H)G, then delegates to the shared test
-/// engine. When `use_spa` is true and the trait is binary, Burden and ACAT-V
-/// use saddlepoint approximation; SKAT always uses moment-matching.
+/// engine. When `use_spa` is true, the trait is binary, AND fitted values
+/// are present, Burden and ACAT-V use saddlepoint approximation; SKAT
+/// always uses moment-matching. Fallback to the sum-stat path when SPA is
+/// requested without fitted values.
 pub fn run_staar(
     g: &Mat<f64>,
     annotation_matrix: &[Vec<f64>],
@@ -63,22 +65,36 @@ pub fn run_staar(
 
     let u = g.transpose() * &null.residuals;
     let k = null.compute_kernel(g);
+    let n = g.nrows();
+    let sigma2 = null.sigma2;
     let spa_mu = if use_spa {
         null.fitted_values.as_deref()
     } else {
         None
     };
 
-    staar_tests(
-        &u,
-        &k,
-        annotation_matrix,
-        mafs,
-        null.sigma2,
-        g.nrows(),
-        Some(g),
-        spa_mu,
-    )
+    // Decide SPA-or-not once here instead of pattern-matching inside a
+    // closure that fires ~68 times per gene.
+    match spa_mu {
+        Some(mu) => staar_tests(
+            &u,
+            &k,
+            annotation_matrix,
+            mafs,
+            sigma2,
+            |w| burden_spa(g, &u, w, mu),
+            |w_acat, _w_burden| acat_v_spa(g, &u, w_acat, mu),
+        ),
+        None => staar_tests(
+            &u,
+            &k,
+            annotation_matrix,
+            mafs,
+            sigma2,
+            |w| burden(&u, &k, w, sigma2),
+            |w_acat, w_burden| acat_v(&u, &k, w_acat, w_burden, mafs, n, sigma2),
+        ),
+    }
 }
 
 /// Burden test with SPA: weighted genotype per sample, then saddlepoint p-value.
@@ -289,22 +305,36 @@ pub fn run_staar_from_sumstats(
     if u.nrows() == 0 {
         return nan_result();
     }
-    staar_tests(u, k, annotation_matrix, mafs, 1.0, n_total, None, None)
+    staar_tests(
+        u,
+        k,
+        annotation_matrix,
+        mafs,
+        1.0,
+        |w| burden(u, k, w, 1.0),
+        |w_acat, w_burden| acat_v(u, k, w_acat, w_burden, mafs, n_total, 1.0),
+    )
 }
 
 /// Shared test engine for both single-study and meta-analysis paths.
 /// Computes all 6 base tests, annotation-weighted variants, and omnibus combinations.
-#[allow(clippy::too_many_arguments)]
-fn staar_tests(
+///
+/// Burden and ACAT-V dispatch is passed in as closures so the SPA vs
+/// sum-stat branch is decided exactly once — at the caller — instead of
+/// pattern-matching per channel per call.
+fn staar_tests<BF, AF>(
     u: &Mat<f64>,
     k: &Mat<f64>,
     annotation_matrix: &[Vec<f64>],
     mafs: &[f64],
     sigma2: f64,
-    n_samples: usize,
-    g_for_spa: Option<&Mat<f64>>,
-    spa_mu: Option<&[f64]>,
-) -> StaarResult {
+    run_burden: BF,
+    run_acat_v: AF,
+) -> StaarResult
+where
+    BF: Fn(&[f64]) -> f64,
+    AF: Fn(&[f64], &[f64]) -> f64,
+{
     let beta_1_25: Vec<f64> = mafs
         .iter()
         .map(|&maf| beta_density_weight(maf, 1.0, 25.0))
@@ -324,19 +354,6 @@ fn staar_tests(
             }
         })
         .collect();
-
-    let run_burden = |w: &[f64]| -> f64 {
-        match (g_for_spa, spa_mu) {
-            (Some(g), Some(mu)) => burden_spa(g, u, w, mu),
-            _ => burden(u, k, w, sigma2),
-        }
-    };
-    let run_acat_v = |w_acat: &[f64], w_burden: &[f64]| -> f64 {
-        match (g_for_spa, spa_mu) {
-            (Some(g), Some(mu)) => acat_v_spa(g, u, w_acat, mu),
-            _ => acat_v(u, k, w_acat, w_burden, mafs, n_samples, sigma2),
-        }
-    };
 
     let m = mafs.len();
     let mut kernel_buf = Mat::zeros(m, m);

@@ -149,12 +149,15 @@ pub fn run_ai_staar(
     let mut all_runs: Vec<Vec<f64>> = Vec::with_capacity(2 * n_cols);
     let mut g1 = Mat::zeros(n, m);
     let mut g2 = Mat::zeros(n, m);
+    // Reuse per-population weight scratch across every base-test iteration.
+    let mut w_b_1 = vec![0.0_f64; n_pops];
+    let mut w_b_2 = vec![0.0_f64; n_pops];
 
     for b in 0..n_cols {
-        let w_b_1: Vec<f64> = (0..n_pops).map(|k| ancestry.pop_weights_1_1[k][b]).collect();
-        let w_b_2: Vec<f64> = (0..n_pops)
-            .map(|k| a_p[k] * ancestry.pop_weights_1_25[k][b])
-            .collect();
+        for k in 0..n_pops {
+            w_b_1[k] = ancestry.pop_weights_1_1[k][b];
+            w_b_2[k] = a_p[k] * ancestry.pop_weights_1_25[k][b];
+        }
 
         for i in 0..n {
             let pop = ancestry.group[i];

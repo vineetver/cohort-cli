@@ -105,6 +105,38 @@ pub struct GeneStats {
     pub k0: Mat<f64>,
 }
 
+/// Per-gene scratch buffers threaded through the joint test kernels.
+///
+/// Allocated once at the top of `multi_tests` and reused across every
+/// per-channel call to `multi_burden` / `multi_skat` / `multi_acat_v`.
+/// Mirrors the `kernel_buf` pattern in `score::staar_tests`: allocate
+/// once per gene, not once per test-per-channel.
+pub struct MultiScratch {
+    /// `b[a] = Σ_j w_j · S[j, a]`, length `n_pheno`.
+    b: Vec<f64>,
+    /// Weighted kernel `W K₀ W`, shape `m × m`, overwritten per call.
+    wkw: Mat<f64>,
+    /// Eigenvalues of `W K₀ W`, length `m`.
+    mu_eigs: Vec<f64>,
+    /// Kronecker pairwise products `{λ_a · μ_j}`, length `m · n_pheno`.
+    joint_eigs: Vec<f64>,
+    /// Burden-weight vector staged by the ACAT-V rare-group path,
+    /// length `m`, cleared per call before repopulation.
+    w_rare: Vec<f64>,
+}
+
+impl MultiScratch {
+    pub fn with_capacity(m: usize, n_pheno: usize) -> Self {
+        Self {
+            b: vec![0.0; n_pheno],
+            wkw: Mat::<f64>::zeros(m, m),
+            mu_eigs: Vec::with_capacity(m),
+            joint_eigs: Vec::with_capacity(m * n_pheno),
+            w_rare: vec![0.0; m],
+        }
+    }
+}
+
 /// Build `(S, K₀)` for one gene.
 pub fn gene_stats(g0: &Mat<f64>, null: &MultiNullContinuous) -> GeneStats {
     let n = g0.nrows();
@@ -153,7 +185,16 @@ pub fn variant_joint_chi2(stats: &GeneStats, sigma_inv: &Mat<f64>, i: usize, n_p
 /// Joint burden test:
 ///
 ///     q_burden(w) = (wᵀ S Σ_res⁻¹ Sᵀ w) / (wᵀ K₀ w) ~ χ²(k_pheno)
-pub fn multi_burden(stats: &GeneStats, sigma_inv: &Mat<f64>, w: &[f64], n_pheno: usize) -> f64 {
+///
+/// `b_buf` is the caller-owned `n_pheno`-sized scratch used to stage
+/// `b[a] = Σ_j w_j · S[j, a]` without allocating per call.
+pub fn multi_burden(
+    stats: &GeneStats,
+    sigma_inv: &Mat<f64>,
+    w: &[f64],
+    n_pheno: usize,
+    b_buf: &mut [f64],
+) -> f64 {
     let m = w.len();
     if m == 0 {
         return 1.0;
@@ -170,19 +211,19 @@ pub fn multi_burden(stats: &GeneStats, sigma_inv: &Mat<f64>, w: &[f64], n_pheno:
     if wkw <= 0.0 || !wkw.is_finite() {
         return 1.0;
     }
+    debug_assert_eq!(b_buf.len(), n_pheno);
     // b[a] = Σ_j w_j · S[j, a]
-    let mut b = vec![0.0_f64; n_pheno];
     for a in 0..n_pheno {
         let mut acc = 0.0;
         for j in 0..m {
             acc += w[j] * stats.s[(j, a)];
         }
-        b[a] = acc;
+        b_buf[a] = acc;
     }
     let mut num = 0.0;
     for a in 0..n_pheno {
         for c in 0..n_pheno {
-            num += b[a] * sigma_inv[(a, c)] * b[c];
+            num += b_buf[a] * sigma_inv[(a, c)] * b_buf[c];
         }
     }
     chisq_pvalue(num / wkw, n_pheno as f64)
@@ -201,6 +242,9 @@ pub fn multi_skat(
     sigma_inv: &Mat<f64>,
     sigma_inv_eigvals: &[f64],
     w: &[f64],
+    wkw_buf: &mut Mat<f64>,
+    mu_buf: &mut Vec<f64>,
+    joint_eigs_buf: &mut Vec<f64>,
 ) -> f64 {
     let m = w.len();
     if m == 0 {
@@ -220,23 +264,25 @@ pub fn multi_skat(
         }
     }
 
-    // Eigenvalues of W K₀ W (m × m) — small.
-    let mut wkw = Mat::<f64>::zeros(m, m);
+    // Eigenvalues of W K₀ W (m × m) — small. Reuse the scratch buffer;
+    // every cell gets overwritten so there is no need to zero first.
+    debug_assert_eq!(wkw_buf.nrows(), m);
+    debug_assert_eq!(wkw_buf.ncols(), m);
     for i in 0..m {
         for j in 0..m {
-            wkw[(i, j)] = w[i] * stats.k0[(i, j)] * w[j];
+            wkw_buf[(i, j)] = w[i] * stats.k0[(i, j)] * w[j];
         }
     }
-    let mu = symmetric_eigenvalues(&wkw);
+    symmetric_eigenvalues_into(wkw_buf, mu_buf);
 
     // Pairwise product gives the (m·k) eigenvalues of the joint kernel.
-    let mut joint_eigs = Vec::with_capacity(m * sigma_inv_eigvals.len());
+    joint_eigs_buf.clear();
     for &la in sigma_inv_eigvals {
-        for &mj in &mu {
-            joint_eigs.push(la * mj);
+        for &mj in mu_buf.iter() {
+            joint_eigs_buf.push(la * mj);
         }
     }
-    stats::mixture_chisq_pvalue(q, &joint_eigs)
+    stats::mixture_chisq_pvalue(q, joint_eigs_buf)
 }
 
 /// Joint ACAT-V. Common variants emit per-variant joint chi-sq p-values;
@@ -252,6 +298,8 @@ pub fn multi_acat_v(
     w_burden: &[f64],
     mafs: &[f64],
     n_samples: usize,
+    w_rare_buf: &mut [f64],
+    b_buf: &mut [f64],
 ) -> f64 {
     const MAC_THRESHOLD: f64 = 10.0;
     let m = w_acat.len();
@@ -276,11 +324,16 @@ pub fn multi_acat_v(
     }
 
     if !rare_indices.is_empty() {
-        let mut w_rare = vec![0.0_f64; m];
-        for &j in &rare_indices {
-            w_rare[j] = w_burden[j];
+        // Reuse the caller-owned scratch; a previous call may have left
+        // stale values, so zero before repopulating.
+        debug_assert_eq!(w_rare_buf.len(), m);
+        for v in w_rare_buf.iter_mut() {
+            *v = 0.0;
         }
-        let p = multi_burden(stats, sigma_inv, &w_rare, n_pheno);
+        for &j in &rare_indices {
+            w_rare_buf[j] = w_burden[j];
+        }
+        let p = multi_burden(stats, sigma_inv, w_rare_buf, n_pheno, b_buf);
         let mean_w: f64 =
             rare_indices.iter().map(|&j| w_acat[j]).sum::<f64>() / rare_indices.len() as f64;
         p_values.push(p);
@@ -310,7 +363,8 @@ pub fn run_multi_staar(
         return nan_result();
     }
     let stats = gene_stats(g0, null);
-    multi_tests(&stats, null, annotation_matrix, mafs)
+    let mut scratch = MultiScratch::with_capacity(m, null.n_pheno);
+    multi_tests(&stats, null, annotation_matrix, mafs, &mut scratch)
 }
 
 fn multi_tests(
@@ -318,9 +372,14 @@ fn multi_tests(
     null: &MultiNullContinuous,
     annotation_matrix: &[Vec<f64>],
     mafs: &[f64],
+    scratch: &mut MultiScratch,
 ) -> StaarResult {
     let m = mafs.len();
     let n_pheno = null.n_pheno;
+    let sigma_inv = &null.sigma_inv;
+    let sigma_inv_eigvals = &null.sigma_inv_eigvals;
+    let n_samples = null.n_samples;
+
     let beta_1_25: Vec<f64> = mafs
         .iter()
         .map(|&maf| beta_density_weight(maf, 1.0, 25.0))
@@ -341,25 +400,31 @@ fn multi_tests(
         })
         .collect();
 
-    let run_burden = |w: &[f64]| multi_burden(stats, &null.sigma_inv, w, n_pheno);
-    let run_skat =
-        |w: &[f64]| multi_skat(stats, &null.sigma_inv, &null.sigma_inv_eigvals, w);
-    let run_acat_v = |w_acat: &[f64], w_burden: &[f64]| {
-        multi_acat_v(
-            stats,
-            &null.sigma_inv,
-            n_pheno,
-            w_acat,
-            w_burden,
-            mafs,
-            null.n_samples,
-        )
-    };
-
-    let base_burden_1_25 = run_burden(&beta_1_25);
-    let base_burden_1_1 = run_burden(&beta_1_1);
-    let base_skat_1_25 = run_skat(&beta_1_25);
-    let base_skat_1_1 = run_skat(&beta_1_1);
+    // Each test call borrows only the scratch fields it actually needs —
+    // disjoint-field borrows let us re-enter `scratch` on the next call
+    // without aliasing.
+    let base_burden_1_25 =
+        multi_burden(stats, sigma_inv, &beta_1_25, n_pheno, &mut scratch.b);
+    let base_burden_1_1 =
+        multi_burden(stats, sigma_inv, &beta_1_1, n_pheno, &mut scratch.b);
+    let base_skat_1_25 = multi_skat(
+        stats,
+        sigma_inv,
+        sigma_inv_eigvals,
+        &beta_1_25,
+        &mut scratch.wkw,
+        &mut scratch.mu_eigs,
+        &mut scratch.joint_eigs,
+    );
+    let base_skat_1_1 = multi_skat(
+        stats,
+        sigma_inv,
+        sigma_inv_eigvals,
+        &beta_1_1,
+        &mut scratch.wkw,
+        &mut scratch.mu_eigs,
+        &mut scratch.joint_eigs,
+    );
     let wa_base_1_25: Vec<f64> = beta_1_25
         .iter()
         .zip(&acat_denom)
@@ -370,8 +435,28 @@ fn multi_tests(
         .zip(&acat_denom)
         .map(|(b, d)| b * b / d)
         .collect();
-    let base_acat_v_1_25 = run_acat_v(&wa_base_1_25, &beta_1_25);
-    let base_acat_v_1_1 = run_acat_v(&wa_base_1_1, &beta_1_1);
+    let base_acat_v_1_25 = multi_acat_v(
+        stats,
+        sigma_inv,
+        n_pheno,
+        &wa_base_1_25,
+        &beta_1_25,
+        mafs,
+        n_samples,
+        &mut scratch.w_rare,
+        &mut scratch.b,
+    );
+    let base_acat_v_1_1 = multi_acat_v(
+        stats,
+        sigma_inv,
+        n_pheno,
+        &wa_base_1_1,
+        &beta_1_1,
+        mafs,
+        n_samples,
+        &mut scratch.w_rare,
+        &mut scratch.b,
+    );
 
     let acat_o = stats::cauchy_combine(&[
         base_burden_1_25,
@@ -414,12 +499,48 @@ fn multi_tests(
         }
 
         let p = [
-            run_burden(&wb_1_25),
-            run_burden(&wb_1_1),
-            run_skat(&ws_1_25),
-            run_skat(&ws_1_1),
-            run_acat_v(&wa_1_25, &wb_1_25),
-            run_acat_v(&wa_1_1, &wb_1_1),
+            multi_burden(stats, sigma_inv, &wb_1_25, n_pheno, &mut scratch.b),
+            multi_burden(stats, sigma_inv, &wb_1_1, n_pheno, &mut scratch.b),
+            multi_skat(
+                stats,
+                sigma_inv,
+                sigma_inv_eigvals,
+                &ws_1_25,
+                &mut scratch.wkw,
+                &mut scratch.mu_eigs,
+                &mut scratch.joint_eigs,
+            ),
+            multi_skat(
+                stats,
+                sigma_inv,
+                sigma_inv_eigvals,
+                &ws_1_1,
+                &mut scratch.wkw,
+                &mut scratch.mu_eigs,
+                &mut scratch.joint_eigs,
+            ),
+            multi_acat_v(
+                stats,
+                sigma_inv,
+                n_pheno,
+                &wa_1_25,
+                &wb_1_25,
+                mafs,
+                n_samples,
+                &mut scratch.w_rare,
+                &mut scratch.b,
+            ),
+            multi_acat_v(
+                stats,
+                sigma_inv,
+                n_pheno,
+                &wa_1_1,
+                &wb_1_1,
+                mafs,
+                n_samples,
+                &mut scratch.w_rare,
+                &mut scratch.b,
+            ),
         ];
         for i in 0..6 {
             by_test[i].push(p[i]);
@@ -502,17 +623,31 @@ fn chisq_pvalue(t: f64, df: f64) -> f64 {
 }
 
 fn symmetric_eigenvalues(mat: &Mat<f64>) -> Vec<f64> {
+    let mut out = Vec::new();
+    symmetric_eigenvalues_into(mat, &mut out);
+    out
+}
+
+/// Overwrite `out` with the clamped eigenvalues of `mat`. Reuses the
+/// caller-owned buffer so the hot path in `multi_skat` avoids a fresh
+/// `Vec<f64>` per call.
+fn symmetric_eigenvalues_into(mat: &Mat<f64>, out: &mut Vec<f64>) {
+    out.clear();
     let n = mat.nrows();
     if n == 0 {
-        return Vec::new();
+        return;
     }
     match mat.self_adjoint_eigen(faer::Side::Lower) {
         Ok(evd) => {
             let s = evd.S();
             let cv = s.column_vector();
-            (0..n).map(|i| cv[i].max(0.0)).collect()
+            for i in 0..n {
+                out.push(cv[i].max(0.0));
+            }
         }
-        Err(_) => vec![0.0; n],
+        Err(_) => {
+            out.resize(n, 0.0);
+        }
     }
 }
 
