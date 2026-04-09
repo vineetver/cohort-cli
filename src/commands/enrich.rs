@@ -23,17 +23,8 @@ pub fn build_config(
         )));
     }
 
-    let output = output_path.unwrap_or_else(|| {
-        let name = input.file_name().unwrap_or_default().to_string_lossy();
-        let stem = name
-            .strip_suffix(".annotated")
-            .or_else(|| name.strip_suffix("/"))
-            .unwrap_or(&name);
-        input
-            .parent()
-            .unwrap_or(&input)
-            .join(format!("{stem}.enriched"))
-    });
+    let output = output_path
+        .unwrap_or_else(|| crate::commands::derive_output_path(&input, &[".annotated"], ".enriched"));
 
     Ok(EnrichConfig {
         input,
@@ -87,19 +78,44 @@ pub fn run_enrich(
         &config.output,
         out,
     )?;
-    write_meta(
-        &tables_written,
-        &resolved,
-        config,
-        annotated.variant_count() as i64,
-        out,
-    );
-    report_result(
-        &tables_written,
-        config,
-        annotated.variant_count() as i64,
-        out,
-    );
+    let input_count = annotated.variant_count() as i64;
+
+    let meta = json!({
+        "cohort_enrich_version": 2,
+        "source": config.input.to_string_lossy(),
+        "tissue": config.tissue_name,
+        "resolved_tissues": resolved,
+        "output_dir": config.output.to_string_lossy(),
+        "tables": tables_written.iter()
+            .map(|(name, rows)| json!({"name": name, "rows": rows}))
+            .collect::<Vec<_>>(),
+        "input_count": input_count,
+        "join_key": "vid",
+        "usage": "SELECT a.*, e.* FROM 'annotated.parquet' a INNER JOIN 'eqtl.parquet' e ON a.vid = e.vid",
+    });
+    let meta_path = config.output.join("enriched.meta.json");
+    if let Ok(json_str) = serde_json::to_string_pretty(&meta) {
+        let _ = std::fs::write(&meta_path, json_str);
+    }
+
+    if tables_written.is_empty() {
+        out.warn("No enrichment data found for these variants in this tissue.");
+    } else {
+        out.success(&format!(
+            "Enriched -> {} ({} tables)",
+            config.output.display(),
+            tables_written.len(),
+        ));
+    }
+    out.result_json(&json!({
+        "status": "ok",
+        "output_dir": config.output.to_string_lossy(),
+        "tables": tables_written.iter()
+            .map(|(name, rows)| json!({"name": name, "rows": rows}))
+            .collect::<Vec<_>>(),
+        "tissue": config.tissue_name,
+        "input_count": input_count,
+    }));
     Ok(())
 }
 
@@ -251,56 +267,3 @@ fn run_enrichment(
     Ok(tables_written)
 }
 
-fn write_meta(
-    tables_written: &[(String, i64)],
-    resolved_tissues: &[String],
-    config: &EnrichConfig,
-    input_count: i64,
-    out: &dyn Output,
-) {
-    let meta = json!({
-        "cohort_enrich_version": 2,
-        "source": config.input.to_string_lossy(),
-        "tissue": config.tissue_name,
-        "resolved_tissues": resolved_tissues,
-        "output_dir": config.output.to_string_lossy(),
-        "tables": tables_written.iter()
-            .map(|(name, rows)| json!({"name": name, "rows": rows}))
-            .collect::<Vec<_>>(),
-        "input_count": input_count,
-        "join_key": "vid",
-        "usage": "SELECT a.*, e.* FROM 'annotated.parquet' a INNER JOIN 'eqtl.parquet' e ON a.vid = e.vid",
-    });
-    let meta_path = config.output.join("enriched.meta.json");
-    if let Ok(json_str) = serde_json::to_string_pretty(&meta) {
-        let _ = std::fs::write(&meta_path, json_str);
-    }
-    let _ = out;
-}
-
-fn report_result(
-    tables_written: &[(String, i64)],
-    config: &EnrichConfig,
-    input_count: i64,
-    out: &dyn Output,
-) {
-    if tables_written.is_empty() {
-        out.warn("No enrichment data found for these variants in this tissue.");
-    } else {
-        out.success(&format!(
-            "Enriched -> {} ({} tables)",
-            config.output.display(),
-            tables_written.len(),
-        ));
-    }
-
-    out.result_json(&json!({
-        "status": "ok",
-        "output_dir": config.output.to_string_lossy(),
-        "tables": tables_written.iter()
-            .map(|(name, rows)| json!({"name": name, "rows": rows}))
-            .collect::<Vec<_>>(),
-        "tissue": config.tissue_name,
-        "input_count": input_count,
-    }));
-}

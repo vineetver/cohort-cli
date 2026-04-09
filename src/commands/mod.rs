@@ -161,6 +161,24 @@ pub fn file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Default output path for a command that transforms an input file in
+/// place: strip any of `strip_suffixes` from the file name (first match
+/// wins), then append `append` and rejoin to the parent directory.
+/// Replaces two hand-rolled copies that used to live in `annotate` and
+/// `enrich`. `ingest` derives its output via `file_stem` plus a build-
+/// tag split and stays inline.
+pub fn derive_output_path(input: &Path, strip_suffixes: &[&str], append: &str) -> PathBuf {
+    let name = input.file_name().unwrap_or_default().to_string_lossy();
+    let stem: &str = strip_suffixes
+        .iter()
+        .find_map(|suf| name.strip_suffix(*suf))
+        .unwrap_or(&name);
+    input
+        .parent()
+        .unwrap_or(input)
+        .join(format!("{stem}{append}"))
+}
+
 pub use crate::data::transfer::human_size as human_bytes;
 
 #[cfg(test)]

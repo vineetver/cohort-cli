@@ -58,17 +58,8 @@ pub fn build_config(
         engine.config().data.tier
     };
 
-    let output = output_path.unwrap_or_else(|| {
-        let name = input.file_name().unwrap_or_default().to_string_lossy();
-        let stem = name
-            .strip_suffix(".ingested")
-            .or_else(|| name.strip_suffix("/"))
-            .unwrap_or(&name);
-        input
-            .parent()
-            .unwrap_or(&input)
-            .join(format!("{stem}.annotated"))
-    });
+    let output = output_path
+        .unwrap_or_else(|| crate::commands::derive_output_path(&input, &[".ingested"], ".annotated"));
 
     Ok(AnnotateConfig {
         input,
