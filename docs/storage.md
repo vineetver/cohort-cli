@@ -286,3 +286,126 @@ VariantIndex:                       SparseG:
 ```
 
 Batch carrier loads sort requested `variant_vcf` values so reads stay sequential.
+
+## Known Limitations
+
+The genotype store is an analysis store, not an archive. It keeps what STAAR
+needs and throws away everything else. Here is what gets lost and where the
+boundaries are.
+
+### What the store cannot represent
+
+```text
+original data                what survives             what is lost
+───────────────────────────  ────────────────────────  ──────────────────────────
+0|1 vs 1|0 (phased het)     dosage = 1                haplotype phase
+0/0 vs ./. (ref vs missing) absent from carrier list   missingness
+GT = 0/1, DP=30, GQ=99      dosage = 1                all FORMAT fields
+imputed dosage 0.73          dosage = 1                posterior probability
+PL, AD, allele depths        nothing                   sample-level QC fields
+VCF headers, INFO fields     nothing                   per-record metadata
+multi-allelic record shape   split biallelic rows       original grouping
+```
+
+The core trade-off: a 200K-sample chromosome stores in tens of MB instead
+of tens of GB, but the conversion is one-way.
+
+### Phase
+
+Every carrier entry is `(sample_idx, dosage)` where dosage is `u8 {1, 2}`.
+Both `0|1` and `1|0` collapse to dosage 1. The store has no phase bit.
+
+To fix this, the carrier entry would need a GT code byte instead of a raw
+dosage, plus a reader that derives dosage from the code. The on-disk
+footprint stays the same (still 1 byte per carrier for the genotype),
+but the builder must stop calling `.round()` on the float and instead
+preserve allele order.
+
+Tracked in [#65](https://github.com/vineetver/favor-cli/issues/65).
+
+### Missingness
+
+A sample absent from a variant's carrier list could mean:
+
+- genotype is 0/0 (true non-carrier)
+- genotype is ./. (missing call)
+- sample was not in the VCF at all
+
+The store treats all three the same: dosage 0.
+
+To distinguish missing from non-carrier, the store would need a per-variant
+missing bitmap or a sparse missing list alongside the carrier block. That
+adds a few bytes per variant but breaks the current assumption that
+"absent = zero."
+
+### Dosage quantization
+
+Imputed dosages (e.g., 0.73 from minimac4 or IMPUTE5) are rounded to the
+nearest integer and clamped to {0, 1, 2}:
+
+```rust
+(dosage.round() as u8).min(2)
+```
+
+Imputation uncertainty, posterior mean, and r-squared are all lost. Every
+downstream test operates on hard calls.
+
+To preserve continuous dosages, the carrier entry would need a wider field
+(f16 or f32 instead of u8), which changes the entry size from 3/5 bytes
+to 4/6 or 6/8 bytes. The sparse layout itself does not change.
+
+### Carrier count cap
+
+Each variant stores its carrier count as u16, capping at 65,535 carriers.
+Variants with more carriers than that are silently truncated. This is fine
+for rare variants (MAF < 0.01 in a 200K cohort = max ~4,000 carriers) but
+will bite common variants if they make it past the MAF filter.
+
+### Inner join drops unannotated variants
+
+The annotation join is an INNER JOIN on `(chromosome, position, ref, alt)`.
+Variants in the VCF that have no match in the FAVOR annotation table are
+silently dropped. Novel variants, non-standard alleles, and normalization
+mismatches all disappear here.
+
+### Gene assignment
+
+The annotation extraction takes `gencode.genes[1]` (the first gene in
+the array). A variant overlapping multiple genes gets tested in all of
+them via membership.parquet, but the variant metadata row only records
+the first gene. The original multi-gene annotation is not recoverable
+from the store.
+
+### No export path
+
+There is no code to write a VCF from the store. You can reconstruct an
+approximate unphased genotype matrix (sample list + variant identity +
+dosage), but it will not match the original VCF because of phase loss,
+dosage quantization, missing/non-carrier ambiguity, and discarded
+FORMAT/INFO fields.
+
+Tracked in [#65](https://github.com/vineetver/favor-cli/issues/65).
+
+### Hard limits
+
+```text
+limit                    value          source
+───────────────────────  ─────────────  ──────────────────────────
+samples per cohort       4.3 billion    u32 sample index (wide mode)
+variants per chromosome  4.3 billion    u32 variant_vcf
+carriers per variant     65,535         u16 carrier count header
+position range           0 to 2^31     i32 position field
+ALT allele index         0 to 255      u8 alt_index in GT parser
+```
+
+### Crash safety
+
+The build writes sparse_g.bin, variants.parquet, and membership.parquet
+separately per chromosome. If the process dies between files, the
+chromosome directory is inconsistent. The staging-then-swap pattern
+protects the final store directory, but a crash during staging leaves
+partial artifacts that `finish_interrupted_swap` cleans up on next build.
+
+There is no write-ahead log or two-phase commit. The lock file prevents
+concurrent builds but does not provide transactional guarantees within
+a single build.
