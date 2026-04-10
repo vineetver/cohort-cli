@@ -46,7 +46,7 @@ impl<'a> CacheStore<'a> {
     }
 
     /// Walk every per-cohort cache subdirectory and remove the ones whose
-    /// cohort id is not in `live`. Used by `cohort store gc`.
+    /// cohort id is not in `live`. Used by `favorstore gc`.
     pub fn prune_orphans(&self, live: &[CohortId]) -> Result<PruneSummary, CohortError> {
         let mut summary = PruneSummary::default();
         let alive: std::collections::HashSet<&str> =

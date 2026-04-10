@@ -25,14 +25,14 @@ pub struct Engine {
 
 impl Engine {
     /// Configured mode — every command except ingest, init, setup, data,
-    /// and uninstall. Errors with `DataMissing` if `cohort setup` has not
+    /// and uninstall. Errors with `DataMissing` if `favorsetup` has not
     /// been run.
     pub fn open(store_path: Option<PathBuf>) -> Result<Self, CohortError> {
         let config = Config::load_configured()?;
         Self::build(store_path, Some(config))
     }
 
-    /// Unconfigured mode — ingest only. Allowed to run before `cohort
+    /// Unconfigured mode — ingest only. Allowed to run before `favor
     /// setup` because ingest just builds variant sets from raw VCFs/TSVs.
     /// If a config file exists and is configured, the engine still picks
     /// it up so build-detection in `apply_build_override` keeps working.
@@ -97,7 +97,7 @@ impl Engine {
     }
 
     /// Memoized annotation registry. The snapshot is bound to the engine
-    /// lifetime — `cohort data pull` mutates `refs.toml` but does not
+    /// lifetime — `favordata pull` mutates `refs.toml` but does not
     /// hold an engine, so within one command's lifetime the registry is
     /// stable. Errors with `DataMissing` on a bare engine.
     pub fn annotation_registry(&self) -> Result<&AnnotationRegistry, CohortError> {
@@ -105,7 +105,7 @@ impl Engine {
             return Ok(reg);
         }
         let config = self.config_opt().ok_or_else(|| {
-            CohortError::DataMissing("Not configured. Run `cohort setup` first.".into())
+            CohortError::DataMissing("Not configured. Run `favorsetup` first.".into())
         })?;
         let reg = self.store.annotations(config)?;
         Ok(self.annotation_registry.get_or_init(|| reg))

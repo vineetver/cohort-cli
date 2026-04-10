@@ -1,4 +1,4 @@
-//! Canonical object model for COHORT.
+//! Canonical object model for FAVOR CLI.
 
 use std::fmt;
 use std::str::FromStr;

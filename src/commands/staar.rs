@@ -157,19 +157,19 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
             let annotations = args.annotations.clone().ok_or_else(|| {
                 CohortError::Input(
                     "Without --cohort, STAAR requires --annotations <path> from \
-                     `cohort annotate`."
+                     `favorannotate`."
                         .into(),
                 )
             })?;
             if !annotations.exists() {
                 return Err(CohortError::Input(format!(
-                    "Annotations not found: {}. Run `cohort annotate` first.",
+                    "Annotations not found: {}. Run `favorannotate` first.",
                     annotations.display()
                 )));
             }
             let ann_vs = VariantSet::open(&annotations).map_err(|e| {
                 CohortError::Input(format!(
-                    "'{}' is not a valid variant set ({}). Run `cohort annotate` to produce one.",
+                    "'{}' is not a valid variant set ({}). Run `favorannotate` to produce one.",
                     annotations.display(),
                     e,
                 ))
@@ -297,7 +297,7 @@ fn emit_dry_run(
                 let manifest_path = cohort.dir().join("manifest.json");
                 if !manifest_path.exists() {
                     return Err(CohortError::DataMissing(format!(
-                        "Cohort '{}' not found at {}. Run `cohort ingest <vcf> \
+                        "Cohort '{}' not found at {}. Run `favoringest <vcf> \
                          --annotations <set> --cohort-id {}` first.",
                         config.cohort_id.as_str(),
                         cohort.dir().display(),
@@ -413,7 +413,7 @@ fn emit_dry_run(
     Ok(())
 }
 
-/// Coarse wall-clock budget for `cohort staar`.
+/// Coarse wall-clock budget for `favorstaar`.
 ///
 /// Calibrated against profiling on the chr22 fixtures: the score-cache fill
 /// dominates and scales linearly with `n_samples × est_rare / threads`. Null

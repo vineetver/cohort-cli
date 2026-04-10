@@ -289,9 +289,9 @@ pub fn run_annotation_join(
     let missing = contract.check(&ann_cols);
     if !missing.is_empty() {
         let tier_hint = if matches!(ann_vs.tier(), Some(crate::config::Tier::Base)) {
-            " Your data was annotated with base tier. Re-run: `cohort annotate --full`."
+            " Your data was annotated with base tier. Re-run: `favorannotate --full`."
         } else {
-            " Re-run: `cohort annotate --full`."
+            " Re-run: `favorannotate --full`."
         };
         return Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
@@ -330,7 +330,7 @@ pub fn build(
     })?;
 
     // Hold a writer lock for the duration of the build so two parallel
-    // `cohort ingest` runs cannot race the staging swap. Lock file lives
+    // `favoringest` runs cannot race the staging swap. Lock file lives
     // next to staging so it survives the rename of `store_dir`.
     let _lock = BuildLock::acquire(&staging.with_extension("lock"))?;
 

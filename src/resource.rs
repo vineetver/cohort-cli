@@ -14,7 +14,7 @@ pub struct Resources {
     pub threads: usize,
     pub temp_dir: PathBuf,
     /// Cap on the dense AI-REML working set (`5·n²·8` bytes). Resolved
-    /// from `COHORT_KINSHIP_MEM_GB` if set, otherwise the default 16 GiB.
+    /// from `FAVOR_KINSHIP_MEM_GB` if set, otherwise the default 16 GiB.
     /// Sourced here so `staar/kinship/budget.rs` does not reach for env.
     pub kinship_budget_bytes: u64,
     /// Configured environment, if set during setup
@@ -127,13 +127,13 @@ fn detect_memory() -> u64 {
         .unwrap_or(4 * 1024 * 1024 * 1024)
 }
 
-/// Resolve the dense AI-REML budget. `COHORT_KINSHIP_MEM_GB` overrides;
+/// Resolve the dense AI-REML budget. `FAVOR_KINSHIP_MEM_GB` overrides;
 /// otherwise the default 16 GiB. Sized independently from `memory_bytes`
 /// because the dense kinship working set scales `5·n²·8` and may need a
 /// distinct cap from the overall DataFusion pool.
 fn detect_kinship_budget() -> u64 {
     const DEFAULT: u64 = 16 * (1u64 << 30);
-    std::env::var("COHORT_KINSHIP_MEM_GB")
+    std::env::var("FAVOR_KINSHIP_MEM_GB")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|g| *g > 0.0)
@@ -160,7 +160,7 @@ fn cgroup_threads() -> Option<usize> {
 }
 
 fn detect_threads(config_threads: Option<usize>) -> usize {
-    env_usize("COHORT_THREADS")
+    env_usize("FAVOR_THREADS")
         .or_else(|| env_usize("SLURM_CPUS_PER_TASK"))
         .or(config_threads)
         .or_else(cgroup_threads)

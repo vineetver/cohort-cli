@@ -3,8 +3,8 @@
 ## Build
 
 ```bash
-git clone https://github.com/vineetver/cohort-cli.git
-cd cohort-cli
+git clone https://github.com/vineetver/favor-cli.git
+cd favor-cli
 cargo check           # type-check (~10s)
 cargo test            # run test suite
 cargo build --release # full build (~5 min, pulls DataFusion + Arrow)
@@ -67,7 +67,7 @@ One entry in `PACKS` in `src/data/mod.rs`. Everything else picks it up.
 
 ## Bugs
 
-Use the [bug report template](https://github.com/vineetver/cohort-cli/issues/new?template=bug_report.yml). Include `cohort --version`, platform, and memory allocation.
+Use the [bug report template](https://github.com/vineetver/favor-cli/issues/new?template=bug_report.yml). Include `favor --version`, platform, and memory allocation.
 
 ## License
 

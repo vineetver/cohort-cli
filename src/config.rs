@@ -279,7 +279,7 @@ impl Config {
         let config = Self::load()?;
         if !config.is_configured() {
             return Err(CohortError::DataMissing(
-                "Not configured. Run `cohort setup` first.".to_string(),
+                "Not configured. Run `favorsetup` first.".to_string(),
             ));
         }
         Ok(config)

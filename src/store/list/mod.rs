@@ -46,7 +46,7 @@ impl VariantSet {
         let meta_path = path.join("meta.json");
         if !meta_path.exists() {
             return Err(CohortError::Input(format!(
-                "Not a variant set: {}. Missing meta.json. Run `cohort ingest` to produce one.",
+                "Not a variant set: {}. Missing meta.json. Run `favoringest` to produce one.",
                 path.display()
             )));
         }
@@ -97,7 +97,7 @@ impl VariantSet {
         match &self.meta.kind {
             Some(VariantSetKind::Annotated { tier }) => Ok(*tier),
             Some(VariantSetKind::Ingested) => Err(CohortError::Input(format!(
-                "{} is an ingested variant set, not annotated. Run `cohort annotate` first.",
+                "{} is an ingested variant set, not annotated. Run `favorannotate` first.",
                 self.root.display()
             ))),
             // Legacy meta predates the kind tag; preserve AnnotatedSet's old default to Full.

@@ -24,10 +24,10 @@ use output::OutputMode;
 
 fn main() {
     let cli = Cli::parse();
-    // COHORT_MACHINE forces machine mode regardless of --format / tty.
+    // FAVOR_MACHINE forces machine mode regardless of --format / tty.
     // Resolved here at the composition root so the output adapter stays
     // env-free.
-    let mode = if std::env::var("COHORT_MACHINE").is_ok_and(|v| !v.is_empty()) {
+    let mode = if std::env::var("FAVOR_MACHINE").is_ok_and(|v| !v.is_empty()) {
         OutputMode::Machine
     } else {
         OutputMode::detect(&cli.format)
@@ -35,7 +35,7 @@ fn main() {
     let out = output::create(&mode);
 
     if let Some(t) = cli.threads {
-        std::env::set_var("COHORT_THREADS", t.to_string());
+        std::env::set_var("FAVOR_THREADS", t.to_string());
     }
 
     let dry_run = cli.dry_run;
@@ -57,7 +57,7 @@ fn run(
 ) -> Result<(), CohortError> {
     let command = command.ok_or_else(|| {
         CohortError::Input(
-            "No command given. Run `cohort --help` to see available commands.".into(),
+            "No command given. Run `favor --help` to see available commands.".into(),
         )
     })?;
     match command {

@@ -28,7 +28,7 @@ pub fn check_memory_budget(n: usize, budget_bytes: u64) -> Result<(), CohortErro
         let budget_gb = budget_bytes as f64 / (1u64 << 30) as f64;
         return Err(CohortError::Resource(format!(
             "Kinship-aware REML for n = {n} samples needs ~{needed_gb:.1} GB of dense matrix \
-             memory; budget is {budget_gb:.1} GB. Set COHORT_KINSHIP_MEM_GB to raise the cap, \
+             memory; budget is {budget_gb:.1} GB. Set FAVOR_KINSHIP_MEM_GB to raise the cap, \
              pass a sparse pedigree kinship to take the sparse path, or reduce sample count."
         )));
     }
@@ -59,7 +59,7 @@ mod tests {
         let err = check_memory_budget(200_000, DEFAULT_KINSHIP_MEM_BYTES).unwrap_err();
         match err {
             CohortError::Resource(msg) => {
-                assert!(msg.contains("COHORT_KINSHIP_MEM_GB"));
+                assert!(msg.contains("FAVOR_KINSHIP_MEM_GB"));
                 assert!(msg.contains("200000"));
             }
             other => panic!("expected Resource, got {other:?}"),

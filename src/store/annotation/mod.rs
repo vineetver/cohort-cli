@@ -22,7 +22,7 @@ impl AnnotationDb {
         let root = data_root.join(tier.as_str());
         if !root.exists() {
             return Err(CohortError::DataMissing(format!(
-                "Annotations not found at {}. Run `cohort data pull --tier {}` first.",
+                "Annotations not found at {}. Run `favordata pull --tier {}` first.",
                 root.display(),
                 tier
             )));
@@ -165,7 +165,7 @@ impl TissueDb {
     pub fn open(tissue_dir: &Path) -> Result<Self, CohortError> {
         if !tissue_dir.exists() {
             return Err(CohortError::DataMissing(format!(
-                "Tissue data not found at {}. Run `cohort data pull --pack eqtl` first.",
+                "Tissue data not found at {}. Run `favordata pull --pack eqtl` first.",
                 tissue_dir.display()
             )));
         }

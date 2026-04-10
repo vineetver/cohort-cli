@@ -55,7 +55,7 @@ Main themes:
 - bounded score-cache memory
 - better machine-visible pool stats
 
-Milestone: [v0.5.0](https://github.com/vineetver/cohort-cli/milestone/5)
+Milestone: [v0.5.0](https://github.com/vineetver/favor-cli/milestone/5)
 
 ### `v0.6.0 - storage and query engine`
 
@@ -67,7 +67,7 @@ This is the store-side follow-on:
 - object-store reads
 - cleaner store query commands
 
-Milestone: [v0.6.0](https://github.com/vineetver/cohort-cli/milestone/6)
+Milestone: [v0.6.0](https://github.com/vineetver/favor-cli/milestone/6)
 
 ## How To Read The Numbers
 

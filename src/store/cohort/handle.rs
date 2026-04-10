@@ -77,8 +77,8 @@ impl<'a> CohortHandle<'a> {
     }
 
     /// Load a pre-built cohort by id without recomputing the source
-    /// fingerprint. Used by `cohort staar --cohort <id>`: the operator
-    /// already built the cohort via `cohort ingest`, and we trust the
+    /// fingerprint. Used by `favorstaar --cohort <id>`: the operator
+    /// already built the cohort via `favoringest`, and we trust the
     /// manifest. Errors with `DataMissing` if the manifest is absent,
     /// unparseable, on a wrong schema version, or missing chromosome
     /// artifacts.
@@ -86,7 +86,7 @@ impl<'a> CohortHandle<'a> {
         let manifest_path = self.dir.join("manifest.json");
         if !manifest_path.exists() {
             return Err(CohortError::DataMissing(format!(
-                "Cohort '{}' not found at {}. Run `cohort ingest <vcf> --annotations <set> \
+                "Cohort '{}' not found at {}. Run `favoringest <vcf> --annotations <set> \
                  --cohort-id {}` first.",
                 self.id.as_str(),
                 self.dir.display(),
@@ -108,7 +108,7 @@ impl<'a> CohortHandle<'a> {
         if manifest.version != 4 {
             return Err(CohortError::DataMissing(format!(
                 "Cohort '{}' is on schema v{}, this build expects v4. Re-run \
-                 `cohort ingest <vcf> --annotations <set> --cohort-id {} --rebuild`.",
+                 `favoringest <vcf> --annotations <set> --cohort-id {} --rebuild`.",
                 self.id.as_str(),
                 manifest.version,
                 self.id.as_str()

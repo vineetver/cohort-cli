@@ -86,7 +86,7 @@ pub fn load_all_segments(
     if !missing.is_empty() {
         return Err(CohortError::Analysis(format!(
             "Invalid summary statistics in {}:\n{}\n\
-             Re-export with: `cohort staar --emit-sumstats`",
+             Re-export with: `favorstaar --emit-sumstats`",
             seg_path.display(),
             ColumnContract::format_missing(&missing),
         )));
@@ -274,7 +274,7 @@ pub fn load_studies(paths: &[std::path::PathBuf]) -> Result<Vec<StudyHandle>, Co
         if !meta_path.exists() {
             return Err(CohortError::Input(format!(
                 "Not a MetaSTAAR study directory: {}. Missing meta_staar.json. \
-                 Run `cohort staar --emit-sumstats` first.",
+                 Run `favorstaar --emit-sumstats` first.",
                 path.display()
             )));
         }

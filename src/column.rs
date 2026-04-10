@@ -1,4 +1,4 @@
-//! Canonical column identifiers for the COHORT pipeline.
+//! Canonical column identifiers for the FAVOR pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Col {
     Chromosome,

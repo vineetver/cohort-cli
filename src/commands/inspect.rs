@@ -66,7 +66,7 @@ fn list_tables(config: &Config, out: &dyn Output) -> Result<(), CohortError> {
 
     if tissue_names.is_empty() {
         out.status(
-            "No tissue tables installed. Run `cohort data pull --pack eqtl` to add tissue data.",
+            "No tissue tables installed. Run `favordata pull --pack eqtl` to add tissue data.",
         );
     }
 
@@ -81,7 +81,7 @@ fn describe_tier(engine: &Engine, tier: Tier, out: &dyn Output) -> Result<(), Co
         Some(p) => p,
         None => {
             return Err(CohortError::DataMissing(format!(
-                "{} tier chromosome=1 not found. Run `cohort data pull{}` first.",
+                "{} tier chromosome=1 not found. Run `favordata pull{}` first.",
                 tier,
                 if tier == Tier::Full { " --full" } else { "" },
             )))
@@ -108,7 +108,7 @@ fn describe_tissue_table(config: &Config, name: &str, out: &dyn Output) -> Resul
     let table_dir = config.tissue_dir().join(name);
     if !table_dir.is_dir() {
         return Err(CohortError::DataMissing(format!(
-            "Tissue table '{}' not found. Run `cohort schema` to list available tables.",
+            "Tissue table '{}' not found. Run `favorschema` to list available tables.",
             name,
         )));
     }
@@ -189,7 +189,7 @@ pub fn manifest(engine: &Engine, output: &dyn Output) -> Result<(), CohortError>
     let manifest = json!({
         "commands": [
             {"name": "ingest",    "status": "available",   "description": "Normalize VCF/TSV to canonical parquet with vid"},
-            {"name": "annotate",  "status": if has_data { "available" } else { "unavailable" }, "requires": "annotation data", "reason": if !has_data { "run `cohort setup` then `cohort data pull`" } else { "" }},
+            {"name": "annotate",  "status": if has_data { "available" } else { "unavailable" }, "requires": "annotation data", "reason": if !has_data { "run `favorsetup` then `favordata pull`" } else { "" }},
             {"name": "enrich",    "status": if has_tissue { "available" } else { "unavailable" }, "requires": "tissue data", "reason": if !has_tissue { "no tissue/ directory found in root" } else { "" }},
             {"name": "interpret", "status": if has_data { "available" } else { "unavailable" }, "requires": "annotated variants"},
             {"name": "staar",     "status": if has_data { "available" } else { "unavailable" }, "requires": "genotypes + annotated variants"},

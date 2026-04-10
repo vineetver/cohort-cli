@@ -99,7 +99,7 @@ pub fn copy_statement(select_sql: &str, output_path: &Path) -> String {
 fn write_header(sql: &mut String, analysis: &Analysis, input_path: &Path, output_path: &Path) {
     let _ = writeln!(
         sql,
-        "-- COHORT ingest: {} -> {}",
+        "-- FAVOR ingest: {} -> {}",
         input_path.display(),
         output_path.display()
     );

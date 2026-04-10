@@ -12,12 +12,12 @@ pub enum GenomeBuild {
 
 #[derive(Parser)]
 #[command(
-    name = "cohort",
+    name = "favor",
     version,
-    about = "Cohort - genomic variant annotation and rare-variant association testing",
+    about = "FAVOR CLI - genomic variant annotation and rare-variant association testing",
     long_about = "Genomic variant annotation, enrichment, and analysis toolkit.\n\n\
         Human mode (default in terminal): colored output, progress bars, interactive prompts.\n\
-        Machine mode (--format json or COHORT_MACHINE=1): structured JSON for LLM agents."
+        Machine mode (--format json or FAVOR_MACHINE=1): structured JSON for LLM agents."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -118,7 +118,7 @@ pub enum Command {
         #[arg(long)]
         build: Option<GenomeBuild>,
 
-        /// Annotated variant set from `cohort annotate` (required for
+        /// Annotated variant set from `favor annotate` (required for
         /// multi-sample VCF input — provides STAAR weights + gene assignments)
         #[arg(long)]
         annotations: Option<PathBuf>,
@@ -186,7 +186,7 @@ pub enum Command {
         #[arg(long)]
         genotypes: Option<PathBuf>,
 
-        /// Pre-built cohort id (from `cohort ingest <vcf> --annotations ... --cohort-id <id>`).
+        /// Pre-built cohort id (from `favor ingest <vcf> --annotations ... --cohort-id <id>`).
         /// Skips probe + rebuild — trusts the manifest at `.cohort/cohorts/<id>/`.
         #[arg(long)]
         cohort: Option<String>,
@@ -203,7 +203,7 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         covariates: Vec<String>,
 
-        /// Annotated variant set from `cohort annotate` (provides aPC weights + gene assignments)
+        /// Annotated variant set from `favor annotate` (provides aPC weights + gene assignments)
         #[arg(long)]
         annotations: Option<PathBuf>,
 
@@ -328,7 +328,7 @@ pub enum Command {
     /// List available analyses and data status (for LLM agents)
     Manifest,
 
-    /// Remove cohort binary and config
+    /// Remove favor binary and config
     Uninstall,
 }
 

@@ -47,7 +47,7 @@ pub fn build_config(
 ) -> Result<AnnotateConfig, CohortError> {
     if !input.exists() {
         return Err(CohortError::Input(format!(
-            "Variant set not found: '{}'. Run `cohort ingest <file>` first to produce one.",
+            "Variant set not found: '{}'. Run `favoringest <file>` first to produce one.",
             input.display()
         )));
     }
@@ -140,7 +140,7 @@ fn validate_input(input: &VariantSet) -> Result<(), CohortError> {
     }
     if input.variant_count() == 0 {
         return Err(CohortError::Input(format!(
-            "Input '{}' has 0 variants. Check that `cohort ingest` completed successfully.",
+            "Input '{}' has 0 variants. Check that `favoringest` completed successfully.",
             input.root().display()
         )));
     }

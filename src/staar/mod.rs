@@ -21,7 +21,7 @@ pub enum TraitType {
     Binary,
 }
 
-/// What this `cohort staar` invocation actually does end-to-end.
+/// What this `favorstaar` invocation actually does end-to-end.
 ///
 /// Replaces the old `emit_sumstats: bool` flag scattered through the
 /// pipeline. Each variant routes to a different terminal stage.

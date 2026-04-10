@@ -1,4 +1,4 @@
-//! `run.json` shape and resume planner for `cohort staar`.
+//! `run.json` shape and resume planner for `favorstaar`.
 //!
 //! Owns the `Stage` enum, the on-disk manifest, the cache-decision log,
 //! and `plan_resume`. Disk writes go through `write_atomic` so a crash
@@ -13,7 +13,7 @@ use crate::error::CohortError;
 use crate::staar::RunMode;
 use crate::store::manifest::write_atomic;
 
-/// One stage in a `cohort staar` run. Order matches execution order.
+/// One stage in a `favorstaar` run. Order matches execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {

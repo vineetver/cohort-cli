@@ -123,7 +123,7 @@ fn emit_dry_run(
     Ok(())
 }
 
-/// Coarse wall-clock budget for `cohort meta-staar`. Dominated by the
+/// Coarse wall-clock budget for `favormeta-staar`. Dominated by the
 /// per-chromosome SQL merge plus per-segment covariance accumulation,
 /// both linear in `(n_studies × total_samples)`.
 fn meta_staar_runtime_seconds(n_studies: usize, total_samples: usize, threads: usize) -> u64 {

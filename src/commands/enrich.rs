@@ -18,7 +18,7 @@ pub fn build_config(
 ) -> Result<EnrichConfig, CohortError> {
     if !input.exists() {
         return Err(CohortError::Input(format!(
-            "Annotated variant set not found: '{}'. Run `cohort annotate` first.",
+            "Annotated variant set not found: '{}'. Run `favorannotate` first.",
             input.display()
         )));
     }

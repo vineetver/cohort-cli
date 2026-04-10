@@ -353,7 +353,7 @@ pub fn fetch_pack_manifest(pack_id: &str) -> Result<PackManifest, CohortError> {
             if manifest.base_dir != pack.base_dir {
                 return Err(CohortError::Resource(format!(
                     "Manifest base_dir '{}' does not match CLI registry '{}' for pack '{}'. \
-                     This indicates a publish/registry mismatch — re-run `cohort data publish`.",
+                     This indicates a publish/registry mismatch — re-run `favordata publish`.",
                     manifest.base_dir, pack.base_dir, pack_id,
                 )));
             }
@@ -635,7 +635,7 @@ fn pull(full: bool, dry_run: bool, yes: bool, output: &dyn Output) -> Result<(),
     } else {
         let remaining = final_state.needs_download().len();
         output.warn(&format!(
-            "{remaining} chromosomes still incomplete. Run `cohort data pull` to retry.",
+            "{remaining} chromosomes still incomplete. Run `favordata pull` to retry.",
         ));
     }
 
@@ -794,7 +794,7 @@ pub fn pull_pack(
     } else {
         let remaining = final_states.len() - final_valid;
         output.warn(&format!(
-            "{remaining} files incomplete. Run `cohort data pull --pack {pack_id}` to retry."
+            "{remaining} files incomplete. Run `favordata pull --pack {pack_id}` to retry."
         ));
     }
 
@@ -806,7 +806,7 @@ fn pull_all_packs(dry_run: bool, yes: bool, output: &dyn Output) -> Result<(), C
 
     if config.data.packs.is_empty() {
         output
-            .warn("No packs configured. Use `cohort data pull --pack <name>` or run `cohort setup`.");
+            .warn("No packs configured. Use `favordata pull --pack <name>` or run `favorsetup`.");
         return Ok(());
     }
 
@@ -999,7 +999,7 @@ fn verify(
         output.success("All packs verified.");
     } else {
         return Err(CohortError::DataMissing(
-            "Verification failed. Run `cohort data pull` to fix.".to_string(),
+            "Verification failed. Run `favordata pull` to fix.".to_string(),
         ));
     }
 

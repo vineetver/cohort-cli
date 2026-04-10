@@ -411,7 +411,7 @@ impl<'a> StaarPipeline<'a> {
     fn stage_validate(&mut self) -> Result<(), CohortError> {
         // For the `Existing` cohort path the operator is loading a cohort
         // by id; the original annotated set may have been deleted. The
-        // tier check happened at `cohort ingest` time, baked into the
+        // tier check happened at `favoringest` time, baked into the
         // cohort store via the rebuild fingerprint. Just probe the
         // manifest exists; the load stage gives a typed error otherwise.
         let annotations = match &self.config.cohort_source {
@@ -420,7 +420,7 @@ impl<'a> StaarPipeline<'a> {
                 let manifest_path = self.cohort_manifest_path();
                 if !manifest_path.exists() {
                     return Err(CohortError::DataMissing(format!(
-                        "Cohort '{}' not found at {}. Run `cohort ingest <vcf> \
+                        "Cohort '{}' not found at {}. Run `favoringest <vcf> \
                          --annotations <set> --cohort-id {}` first.",
                         self.config.cohort_id.as_str(),
                         manifest_path
@@ -439,7 +439,7 @@ impl<'a> StaarPipeline<'a> {
         // skip — surface the missing-file message rather than no-op.
         if !annotations.exists() {
             return Err(CohortError::Input(format!(
-                "Annotations no longer at '{}'. Re-run `cohort annotate` or check the path.",
+                "Annotations no longer at '{}'. Re-run `favorannotate` or check the path.",
                 annotations.display()
             )));
         }
@@ -461,9 +461,9 @@ impl<'a> StaarPipeline<'a> {
             return Ok(());
         }
         let tier_hint = if matches!(ann_vs.tier(), Some(crate::config::Tier::Base)) {
-            " Your data was annotated with base tier. Re-run: `cohort annotate --full`."
+            " Your data was annotated with base tier. Re-run: `favorannotate --full`."
         } else {
-            " Re-run: `cohort annotate --full`."
+            " Re-run: `favorannotate --full`."
         };
         Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
@@ -476,7 +476,7 @@ impl<'a> StaarPipeline<'a> {
 
     fn stage_ensure_store(&mut self) -> Result<GenoStoreResult, CohortError> {
         // Existing cohort path: trust the manifest, no rebuild, no probe.
-        // The operator already built this cohort via `cohort ingest`.
+        // The operator already built this cohort via `favoringest`.
         if matches!(self.config.cohort_source, CohortSource::Existing) {
             self.manifest.outputs.cache_decisions.push(CacheDecision {
                 artifact: ArtifactKind::GenotypeStore,

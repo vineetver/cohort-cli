@@ -125,14 +125,14 @@ fn build_pack_list(config: &Config, probe: &DirProbe) -> String {
         .map(|p| format!("- **{}** ({}): {}", p.id, p.size_human, p.description))
         .collect();
     if lines.is_empty() {
-        return "- No optional packs. Run `cohort data pull --pack <id>` then `cohort init --force`.".into();
+        return "- No optional packs. Run `favor data pull --pack <id>` then `favor init --force`.".into();
     }
     lines.join("\n")
 }
 
-const INIT_TEMPLATE: &str = r#"# COHORT Genomic Analysis
+const INIT_TEMPLATE: &str = r#"# FAVOR Genomic Analysis
 
-Always pass `--format json` to every cohort command. Use `--dry-run` before heavy computation.
+Always pass `--format json` to every favor command. Use `--dry-run` before heavy computation.
 
 ## System
 
@@ -148,26 +148,26 @@ Always pass `--format json` to every cohort command. Use `--dry-run` before heav
 ## Pipeline
 
 ```
-variant file -> cohort ingest -> cohort annotate -> cohort enrich --tissue X
-                                                -> cohort staar (rare-variant association)
-                                                -> cohort interpret (variant-to-gene)
+variant file -> favor ingest -> favor annotate -> favor enrich --tissue X
+                                                -> favor staar (rare-variant association)
+                                                -> favor interpret (variant-to-gene)
 ```
 
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
-| `cohort ingest <file>` | Normalize VCF/TSV/CSV to parquet with variant ID |
-| `cohort annotate <file>` | Add CADD, ClinVar, gnomAD, REVEL, aPC scores, regulatory marks |
-| `cohort enrich <file> --tissue <name>` | Add tissue eQTL, ChromBPNet, enhancer-gene links |
-| `cohort staar --genotypes <vcf> --phenotype <tsv> --trait-name <col> --annotations <parquet>` | Rare-variant burden test (STAAR-O) |
-| `cohort schema [table]` | Show column names and types |
-| `cohort manifest` | List installed data and available commands |
+| `favor ingest <file>` | Normalize VCF/TSV/CSV to parquet with variant ID |
+| `favor annotate <file>` | Add CADD, ClinVar, gnomAD, REVEL, aPC scores, regulatory marks |
+| `favor enrich <file> --tissue <name>` | Add tissue eQTL, ChromBPNet, enhancer-gene links |
+| `favor staar --genotypes <vcf> --phenotype <tsv> --trait-name <col> --annotations <parquet>` | Rare-variant burden test (STAAR-O) |
+| `favor schema [table]` | Show column names and types |
+| `favor manifest` | List installed data and available commands |
 
 ## STAAR usage
 
 ```bash
-cohort staar --dry-run --format json \
+favor staar --dry-run --format json \
   --genotypes cohort.vcf.gz \
   --phenotype pheno.tsv \
   --trait-name LDL \
@@ -176,7 +176,7 @@ cohort staar --dry-run --format json \
   --masks coding
 ```
 
-Use `--dry-run` first to check memory. On HPC: `srun --mem=64G -c 8 cohort staar ...`
+Use `--dry-run` first to check memory. On HPC: `srun --mem=64G -c 8 favor staar ...`
 
 ## Interpreting results
 
@@ -287,14 +287,14 @@ pub fn setup(
 
         if !has_srun && !has_sbatch {
             output.warn("srun/sbatch not found in PATH — are you sure this is HPC?");
-            output.warn("Continuing anyway. You can re-run `cohort setup` to change.");
+            output.warn("Continuing anyway. You can re-run `favorsetup` to change.");
         }
     }
 
     let res_detect = Resources::detect();
     let probe = DirProbe::scan(&root);
 
-    output.status("COHORT Configuration");
+    output.status("FAVOR Configuration");
     output.status(&format!("  Root:       {}", root.display()));
     output.status(&format!("  Tier:       {tier}"));
 
@@ -371,7 +371,7 @@ pub fn setup(
         output,
     ) {
         output.warn(
-            "Config saved but annotation download incomplete. Run `cohort data pull` to retry.",
+            "Config saved but annotation download incomplete. Run `favordata pull` to retry.",
         );
         return Err(e);
     }
@@ -380,7 +380,7 @@ pub fn setup(
     for pack in Pack::required() {
         if let Err(e) = crate::data::transfer::pull_pack(pack.id, false, true, output) {
             output.warn(&format!(
-                "{} failed: {e}. Run `cohort data pull --pack {}` to retry.",
+                "{} failed: {e}. Run `favordata pull --pack {}` to retry.",
                 pack.name, pack.id
             ));
         }
@@ -390,7 +390,7 @@ pub fn setup(
     for pack_id in &selected_packs {
         if let Err(e) = crate::data::transfer::pull_pack(pack_id, false, true, output) {
             output.warn(&format!(
-                "Pack '{pack_id}' failed: {e}. Run `cohort data pull --pack {pack_id}` to retry."
+                "Pack '{pack_id}' failed: {e}. Run `favordata pull --pack {pack_id}` to retry."
             ));
         }
     }

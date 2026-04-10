@@ -144,12 +144,12 @@ fn run_cohort_build(
     let annotations_path = config.annotations.as_ref().ok_or_else(|| {
         CohortError::Input(format!(
             "Multi-sample VCF detected ({n_samples} samples in {}). \
-             `cohort ingest` needs an annotated variant set for the genotype \
+             `favor ingest` needs an annotated variant set for the genotype \
              store build:\n\
              \n\
-             1. cohort ingest <vcf> --output variants.set    (sites only — drops genotypes)\n\
-             2. cohort annotate variants.set --full\n\
-             3. cohort ingest <vcf> --annotations variants.set.annotated --cohort-id <id>",
+             1. favor ingest <vcf> --output variants.set    (sites only — drops genotypes)\n\
+             2. favor annotate variants.set --full\n\
+             3. favor ingest <vcf> --annotations variants.set.annotated --cohort-id <id>",
             vcf_path.display()
         ))
     })?;
