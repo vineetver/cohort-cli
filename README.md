@@ -29,32 +29,84 @@ curl -fsSL https://raw.githubusercontent.com/vineetver/favor-cli/master/install.
 ## Quick Start
 
 ```bash
-favor setup
+# 1. configure: point at a data directory + choose annotation tier
+favor setup --root /data/favor --tier base
+
+# 2. pull annotation data (~200 GB base, ~508 GB full)
 favor data pull
-favor ingest input.vcf.gz
-favor annotate input.ingested
+
+# 3. ingest and annotate variants
+favor ingest variants.vcf.gz
+favor annotate variants.ingested
+
+# 4. run STAAR rare-variant association
 favor staar --genotypes cohort.vcf.gz --phenotype pheno.tsv \
   --trait-name LDL --covariates age,sex,PC1,PC2 \
-  --annotations input.annotated
+  --annotations variants.annotated
 ```
 
 ## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `favor ingest` | Normalize variant inputs into a canonical variant set |
+| Command | What it does |
+|---------|-------------|
+| `favor setup` | Configure data root, annotation tier, environment |
+| `favor data pull` | Download annotation parquets and optional packs |
+| `favor ingest` | Normalize VCF/TSV/CSV into canonical parquet variant sets |
 | `favor annotate` | Join variants against FAVOR base or full annotations |
-| `favor enrich` | Join tissue-specific tables onto annotated variants |
-| `favor staar` | Run single-study rare-variant association tests |
-| `favor meta-staar` | Run cross-study meta-analysis from summary-stat outputs |
-| `favor data` | Pull, inspect, and verify annotation packs |
-| `favor schema` | Inspect installed table schemas |
-| `favor manifest` | Show installed data and command availability |
-| `favor setup` | Configure paths, tier, and environment defaults |
+| `favor enrich` | Overlay tissue-specific eQTL, regulatory, enhancer-gene data |
+| `favor staar` | STAAR rare-variant association testing |
+| `favor meta-staar` | Cross-study meta-analysis from summary statistics |
+| `favor schema` | Inspect annotation table columns and types |
+| `favor manifest` | Show installed data and available commands |
 
-Machine mode: use `--format json`. For heavy runs, use `--dry-run` first.
+Use `--format json` for machine-readable output. Use `--dry-run` before heavy computation.
 
-Docs: [Storage](docs/storage.md), [Validation](docs/validation.md), [Performance](docs/performance.md), [Agent reference](AGENTS.md).
+## Data layout
+
+FAVOR CLI uses two separate storage areas:
+
+**Data root** (`--root` during setup) holds annotation parquets shared across projects:
+
+```
+/data/favor/
+  base/chromosome=*/sorted.parquet      # base tier (~200 GB)
+  full/chromosome=*/sorted.parquet      # full tier (~508 GB)
+  tissue/                               # optional enrichment packs
+    reference/                          #   gene index, cCRE regions (40 MB, always installed)
+    rollups/                            #   gene-level summaries (49 MB, always installed)
+    variant_in_region/                  #   variant-region junction (155 GB, always installed)
+    variant_eqtl/                       #   GTEx eQTL (3 GB, optional)
+    region_ccre_tissue_signals/         #   ENCODE regulatory (18 GB, optional)
+    ...
+```
+
+**Project store** (`.cohort/` in your working directory) holds per-project cohort data:
+
+```
+my_study/
+  .cohort/
+    cohorts/<id>/                       # built by favor ingest or favor staar
+      manifest.json
+      samples.txt
+      chromosome=*/
+        sparse_g.bin                    # sparse genotype matrix (mmap'd)
+        variants.parquet                # variant metadata + STAAR weights
+        membership.parquet              # gene-variant assignments
+    cache/score_cache/                  # reused across mask/MAF reruns
+    annotations/refs.toml               # attached annotation databases
+```
+
+The store root is resolved as: `--store-path` flag > `FAVOR_STORE` env > walk up for `.cohort/` > `<cwd>/.cohort/`.
+
+See [Setup guide](docs/setup.md) for detailed configuration, pack selection, HPC tips, and working directory organization.
+
+## Docs
+
+- **[Setup guide](docs/setup.md)** - installation, configuration, data management, HPC best practices
+- [Storage engine](docs/storage.md) - store format and migration status
+- [Validation](docs/validation.md) - statistical accuracy vs R reference
+- [Performance](docs/performance.md) - benchmarks and optimization roadmap
+- [Agent reference](AGENTS.md) - machine interface for LLM agents
 
 ## Roadmap
 

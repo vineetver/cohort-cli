@@ -460,14 +460,11 @@ impl<'a> StaarPipeline<'a> {
         if missing.is_empty() {
             return Ok(());
         }
-        let tier_hint = if matches!(ann_vs.tier(), Some(crate::config::Tier::Base)) {
-            " Your data was annotated with base tier. Re-run: `favorannotate --full`."
-        } else {
-            " Re-run: `favorannotate --full`."
-        };
+        let tier_hint =
+            " Re-run: `favor annotate` to produce a complete annotated set.";
         Err(CohortError::DataMissing(format!(
             "Missing annotation columns in {}:\n{}\n\
-             STAAR requires FAVOR full-tier annotations.{}",
+             STAAR needs all 11 annotation weight channels.{}",
             annotations.display(),
             ColumnContract::format_missing(&missing),
             tier_hint,

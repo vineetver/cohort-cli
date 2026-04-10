@@ -13,3 +13,4 @@ testdata/
 doc/tui-backlog.md
 docs/storage-engine-design.md
 bench/
+.cohort/
