@@ -181,10 +181,12 @@ pub enum Command {
 
     /// STAAR rare variant association testing
     Staar {
-        /// Multi-sample VCF with genotypes (.vcf or .vcf.gz). Required unless
-        /// `--cohort <id>` is given to load a pre-built cohort store.
-        #[arg(long)]
-        genotypes: Option<PathBuf>,
+        /// Multi-sample VCF(s) with genotypes (.vcf or .vcf.gz). Accepts
+        /// multiple files, globs, or a directory of per-chromosome VCFs.
+        /// Required unless `--cohort <id>` is given to load a pre-built
+        /// cohort store.
+        #[arg(long, num_args = 1..)]
+        genotypes: Vec<PathBuf>,
 
         /// Pre-built cohort id (from `favor ingest <vcf> --annotations ... --cohort-id <id>`).
         /// Skips probe + rebuild — trusts the manifest at `.cohort/cohorts/<id>/`.

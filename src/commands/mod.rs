@@ -157,10 +157,6 @@ pub fn emit(plan: &DryRunPlan, out: &dyn Output) {
     out.result_json(&serde_json::to_value(plan).unwrap_or_default());
 }
 
-pub fn file_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
-
 /// Default output path for a command that transforms an input file in
 /// place: strip any of `strip_suffixes` from the file name (first match
 /// wins), then append `append` and rejoin to the parent directory.

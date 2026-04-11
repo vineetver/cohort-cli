@@ -33,7 +33,7 @@ use crate::types::{AnnotatedVariant, Chromosome};
 pub enum CohortSource {
     Existing,
     Fresh {
-        genotypes: PathBuf,
+        genotypes: Vec<PathBuf>,
         annotations: PathBuf,
     },
 }
@@ -63,9 +63,9 @@ pub struct StaarConfig {
 }
 
 impl StaarConfig {
-    pub fn genotypes(&self) -> Option<&Path> {
+    pub fn genotypes(&self) -> Option<&[PathBuf]> {
         match &self.cohort_source {
-            CohortSource::Fresh { genotypes, .. } => Some(genotypes.as_path()),
+            CohortSource::Fresh { genotypes, .. } => Some(genotypes.as_slice()),
             CohortSource::Existing => None,
         }
     }
@@ -128,15 +128,15 @@ impl StaarConfig {
         &'a self,
         existing_cohort_manifest: Option<&'a Path>,
     ) -> ConfigHashInputs<'a> {
-        let (genotypes, annotations): (&Path, &Path) = match &self.cohort_source {
+        let (genotypes, annotations): (Vec<PathBuf>, &Path) = match &self.cohort_source {
             CohortSource::Fresh {
                 genotypes,
                 annotations,
-            } => (genotypes, annotations),
+            } => (genotypes.clone(), annotations),
             CohortSource::Existing => {
                 let p = existing_cohort_manifest
                     .expect("existing cohort config hash requires a resolved manifest path");
-                (p, p)
+                (vec![p.to_path_buf()], p)
             }
         };
         ConfigHashInputs {
@@ -990,7 +990,7 @@ mod tests {
     fn dummy_config() -> StaarConfig {
         StaarConfig {
             cohort_source: CohortSource::Fresh {
-                genotypes: PathBuf::from("/tmp/g.vcf.gz"),
+                genotypes: vec![PathBuf::from("/tmp/g.vcf.gz")],
                 annotations: PathBuf::from("/tmp/a.annotated"),
             },
             phenotype: PathBuf::from("/tmp/p.tsv"),
