@@ -138,12 +138,13 @@ pub fn extract_genotypes(
     }
     pb.finish(&format!("{} variants extracted", gw.variant_count()));
 
+    let total_variants = gw.variant_count();
     let source_vcfs = vcf_paths.iter().map(|p| p.display().to_string()).collect();
     let result = gw.finish(&sample_names, source_vcfs)?;
 
     output.success(&format!(
-        "Extracted {} variants × {} samples from {} file(s)",
-        result.output_dir.display(), n_samples, vcf_paths.len(),
+        "Extracted {total_variants} variants × {n_samples} samples from {} file(s)",
+        vcf_paths.len(),
     ));
 
     Ok(result)
@@ -204,6 +205,7 @@ impl GenotypeWriter {
     /// Push one biallelic variant with dosages extracted from raw VCF sample text.
     /// `chrom` and `pos/ref/alt` must already be normalized.
     /// `alt_idx` is the 1-based index of this alt allele in the original record.
+    #[allow(clippy::too_many_arguments)]
     pub fn push(
         &mut self,
         chrom: &str,

@@ -1179,13 +1179,17 @@ pub fn parse_known_loci_file(
 ///   K_cond = K_tt - K_tc * K_cc^{-1} * K_ct
 ///
 /// where t = test (gene) variants, c = conditioning (known loci) variants.
+/// Conditional meta-scoring uses the homogeneous model: condition the
+/// merged (cross-study) U and K on known-loci variants via Schur complement.
+/// The heterogeneous model (per-study conditioning) is rejected at config
+/// time because --emit-sumstats does not yet persist per-study U vectors.
 pub fn meta_score_gene_conditional(
     group: &MaskGroup,
     meta_variants: &[MetaVariant],
     studies: &[StudyHandle],
     segment_cache: &HashMap<(usize, i32), SegmentCov>,
     known_loci_indices: &[usize],
-    heterogeneous: bool,
+    _heterogeneous: bool,
 ) -> Option<GeneResult> {
     let gene_indices: Vec<usize> = group
         .variant_indices
@@ -1221,34 +1225,6 @@ pub fn meta_score_gene_conditional(
         .copied()
         .collect();
     let m_all = combined.len();
-
-    if heterogeneous {
-        // Heterogeneous: condition per-study, then sum.
-        let mut u_cond = Mat::zeros(m_t, 1);
-        let mut k_cond = Mat::zeros(m_t, m_t);
-
-        for study_idx in 0..studies.len() {
-            let (u_s, cov_s) =
-                build_study_u_cov(&combined, meta_variants, study_idx, segment_cache);
-            let (u_t_s, k_tt_s, u_c_s, k_cc_s, k_tc_s) =
-                partition_u_cov(&u_s, &cov_s, m_t, m_c);
-            let (du, dk) = schur_condition(&u_t_s, &k_tt_s, &u_c_s, &k_cc_s, &k_tc_s);
-            for i in 0..m_t {
-                u_cond[(i, 0)] += du[(i, 0)];
-                for j in 0..m_t {
-                    k_cond[(i, j)] += dk[(i, j)];
-                }
-            }
-        }
-
-        return finish_conditional(
-            &gene_indices,
-            meta_variants,
-            &u_cond,
-            &k_cond,
-            group,
-        );
-    }
 
     // Homogeneous: condition merged U/K.
     let mut u_all = Mat::zeros(m_all, 1);
@@ -1296,66 +1272,8 @@ pub fn meta_score_gene_conditional(
     finish_conditional(&gene_indices, meta_variants, &u_cond, &k_cond, group)
 }
 
-/// Build per-study U and covariance for a combined set of variant indices.
-fn build_study_u_cov(
-    combined: &[usize],
-    meta_variants: &[MetaVariant],
-    study_idx: usize,
-    segment_cache: &HashMap<(usize, i32), SegmentCov>,
-) -> (Mat<f64>, Mat<f64>) {
-    let m = combined.len();
-    let mut u = Mat::zeros(m, 1);
-    // Per-study U is stored as part of the segment data. For simplicity,
-    // use the meta-aggregated U scaled by (study_n / total_n) as an
-    // approximation. The exact per-study U would require storing per-study
-    // score vectors, which emit-sumstats does not currently persist at the
-    // variant level. This is standard practice in meta-STAAR.
-    let study_n = meta_variants
-        .iter()
-        .flat_map(|mv| mv.study_segments.iter())
-        .filter(|&&(s, _)| s == study_idx)
-        .count();
-    let _ = study_n; // unused — u_meta is already the sum
-    for (local, &gi) in combined.iter().enumerate() {
-        // Use aggregated U — the conditioning math holds for sum(U_s) and
-        // sum(K_s) under the homogeneous assumption.
-        u[(local, 0)] = meta_variants[gi].u_meta;
-    }
-
-    let keys: Vec<(u32, &str, &str)> = combined
-        .iter()
-        .map(|&gi| {
-            (
-                meta_variants[gi].variant.position,
-                &*meta_variants[gi].variant.ref_allele,
-                &*meta_variants[gi].variant.alt_allele,
-            )
-        })
-        .collect();
-
-    let mut cov = Mat::zeros(m, m);
-    let mut needed_segments: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    for &gi in combined {
-        for &(sidx, seg_id) in &meta_variants[gi].study_segments {
-            if sidx == study_idx {
-                needed_segments.insert(seg_id);
-            }
-        }
-    }
-    for seg_id in needed_segments {
-        if let Some(seg) = segment_cache.get(&(study_idx, seg_id)) {
-            let sub = seg.extract_submatrix(&keys);
-            for i in 0..m {
-                for j in 0..m {
-                    cov[(i, j)] += sub[(i, j)];
-                }
-            }
-        }
-    }
-    (u, cov)
-}
-
 /// Partition combined U and K into test (t) and conditioning (c) blocks.
+#[allow(clippy::type_complexity)]
 fn partition_u_cov(
     u: &Mat<f64>,
     k: &Mat<f64>,
