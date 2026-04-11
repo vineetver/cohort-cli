@@ -126,6 +126,7 @@ TMPDIR                 scratch space
 - **[Setup guide](docs/setup.md)** - installation, configuration, data management, HPC best practices
 - [Genotype store](docs/storage.md) - sparse genotype store for rare-variant analysis
 - [Validation](docs/validation.md) - statistical accuracy vs R reference
+- [Statistical divergences](docs/statistical-divergences.md) - known differences from R STAAR/SKAT and why
 - [Performance](docs/performance.md) - benchmarks and optimization roadmap
 - [Agent reference](AGENTS.md) - machine interface for LLM agents
 
