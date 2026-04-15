@@ -1,5 +1,7 @@
 # Statistical Divergences from R
 
+> [Back to README](../README.md) · [STAAR](staar.md) · [Validation](validation.md)
+
 Where favor-cli differs from the R reference packages and why.
 
 ## SKAT p-value: moment-matching vs eigenvalue saddlepoint

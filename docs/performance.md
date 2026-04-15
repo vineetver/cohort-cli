@@ -2,7 +2,7 @@
 
 Where time and memory go in COHORT today.
 
-> [Back to README](../README.md) · [Genotype Store](storage.md)
+> [Back to README](../README.md) · [Genotype Store](storage.md) · [STAAR](staar.md)
 
 ## Hot Paths
 

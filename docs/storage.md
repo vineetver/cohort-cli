@@ -15,7 +15,7 @@ to a single variant index so STAAR/burden/SKAT runs are fast.
 
 If the input VCF changes, the store is rebuilt.
 
-> [Back to README](../README.md) · [Performance](performance.md)
+> [Back to README](../README.md) · [STAAR](staar.md) · [Performance](performance.md)
 
 ## Why Sparse?
 
