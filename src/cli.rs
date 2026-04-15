@@ -279,6 +279,12 @@ pub enum Command {
         #[arg(long)]
         known_loci: Option<PathBuf>,
 
+        /// Load a pre-fit null model from FVNULLM1 binary (skips the fit stage).
+        /// Unrelated samples only; kinship-aware import lands once the
+        /// sparse Cholesky factor is serializable.
+        #[arg(long, value_name = "PATH")]
+        null_model: Option<PathBuf>,
+
         /// Export summary statistics for MetaSTAAR instead of running tests
         #[arg(long)]
         emit_sumstats: bool,

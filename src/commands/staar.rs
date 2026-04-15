@@ -38,6 +38,7 @@ pub struct StaarArgs {
     pub kinship: Vec<PathBuf>,
     pub kinship_groups: Option<String>,
     pub known_loci: Option<PathBuf>,
+    pub null_model: Option<PathBuf>,
     pub emit_sumstats: bool,
     pub rebuild_store: bool,
     pub column_map: Vec<String>,
@@ -232,6 +233,7 @@ fn build_config(args: StaarArgs) -> Result<StaarConfig, CohortError> {
         kinship: args.kinship,
         kinship_groups: blank_to_none(args.kinship_groups),
         known_loci: args.known_loci,
+        null_model_path: args.null_model,
         run_mode: if multi_trait {
             RunMode::MultiTrait
         } else if args.emit_sumstats {
@@ -562,6 +564,7 @@ mod tests {
             kinship: Vec::new(),
             kinship_groups: None,
             known_loci: None,
+            null_model: None,
             emit_sumstats: false,
             rebuild_store: false,
             column_map: Vec::new(),
