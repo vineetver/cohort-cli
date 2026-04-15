@@ -55,6 +55,7 @@ pub struct StaarConfig {
     pub kinship: Vec<PathBuf>,
     pub kinship_groups: Option<String>,
     pub known_loci: Option<PathBuf>,
+    pub null_model_path: Option<PathBuf>,
     pub run_mode: RunMode,
     pub rebuild_store: bool,
     pub column_map: HashMap<String, String>,
@@ -611,6 +612,29 @@ impl<'a> StaarPipeline<'a> {
         pheno: &PhenoStageOut,
         store: &GenoStoreResult,
     ) -> Result<NullModel, CohortError> {
+        if let Some(path) = self.config.null_model_path.as_ref() {
+            if self.config.has_kinship() {
+                return Err(CohortError::Input(
+                    "--null-model is not yet compatible with --kinship; drop --kinship to \
+                     use the imported null, or remove --null-model to refit with kinship."
+                        .into(),
+                ));
+            }
+            self.out.status(&format!(
+                "Loading null model from {}...",
+                path.display(),
+            ));
+            let nm = null_model_cache::load_from_file(path)?;
+            if nm.n_samples != pheno.n {
+                return Err(CohortError::Input(format!(
+                    "imported null model has n_samples={}, phenotype has n={}",
+                    nm.n_samples, pheno.n,
+                )));
+            }
+            self.out.status(&format!("  sigma2 = {:.4}", nm.sigma2));
+            return Ok(nm);
+        }
+
         let has_kinship = self.config.has_kinship();
 
         // Cache lookup (skip for kinship models — KinshipState contains
@@ -1059,6 +1083,7 @@ mod tests {
             kinship: Vec::new(),
             kinship_groups: None,
             known_loci: None,
+            null_model_path: None,
             run_mode: RunMode::Analyze,
             rebuild_store: false,
             column_map: HashMap::new(),

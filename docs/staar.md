@@ -104,6 +104,17 @@ trace for log-det, and Takahashi's formula for the partial inverse the
 score test needs. `Glm` / `Logistic` fits cache to disk keyed by hash of
 (phenotype, covariates, kinship). Kinship fits don't cache in v0.2.
 
+### Importing a pre-fit null
+
+`--null-model <path>` loads a null fitted elsewhere (another favor-cli run,
+a GENESIS or GMMAT session) and skips the fit stage. The binary is the
+same `FVNULLM1` format the internal cache writes: 64-byte header (magic,
+version, `n`, `k`, `sigma2`, flags), then `residuals[n]`, `x_matrix[n·k]`,
+`xtx_inv[k·k]` as raw little-endian `f64`, then optional `fitted_values`
+and `working_weights` vectors flagged in the header. Unrelated samples
+only for now; kinship-aware import needs the sparse Cholesky factor to be
+serializable and lands with the kinship disk cache.
+
 ## Score Test
 
 ```text

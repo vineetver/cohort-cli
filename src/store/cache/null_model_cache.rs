@@ -167,9 +167,15 @@ pub fn save(dir: &Path, model: &NullModel) -> Result<(), CohortError> {
 
 /// Deserialize a NullModel from disk.
 pub fn load(dir: &Path) -> Result<NullModel, CohortError> {
-    let path = dir.join("null_model.bin");
+    load_from_file(&dir.join("null_model.bin"))
+}
+
+/// Deserialize a NullModel from a bare `.bin` file. External-import entry
+/// point for `--null-model`; the cache loader uses `load(dir)` which wraps
+/// this after appending `null_model.bin`.
+pub fn load_from_file(path: &Path) -> Result<NullModel, CohortError> {
     let mut f = std::io::BufReader::new(
-        std::fs::File::open(&path)
+        std::fs::File::open(path)
             .map_err(|e| CohortError::DataMissing(format!("open {}: {e}", path.display())))?,
     );
 
@@ -332,6 +338,35 @@ mod tests {
     fn probe_missing_returns_false() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!probe(dir.path()));
+    }
+
+    #[test]
+    fn load_from_file_matches_load_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = dummy_model(40, 2);
+        model.fitted_values = Some(vec![0.3; 40]);
+        model.working_weights = Some(vec![0.21; 40]);
+        save(dir.path(), &model).unwrap();
+
+        let via_dir = load(dir.path()).unwrap();
+        let via_file = load_from_file(&dir.path().join("null_model.bin")).unwrap();
+
+        assert_eq!(via_dir.n_samples, via_file.n_samples);
+        assert_eq!(via_dir.x_matrix.ncols(), via_file.x_matrix.ncols());
+        assert!((via_dir.sigma2 - via_file.sigma2).abs() < 1e-12);
+        for i in 0..via_dir.n_samples {
+            assert_eq!(via_dir.residuals[(i, 0)], via_file.residuals[(i, 0)]);
+        }
+    }
+
+    #[test]
+    fn load_from_file_missing_is_data_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        match load_from_file(&dir.path().join("does-not-exist.bin")) {
+            Err(CohortError::DataMissing(_)) => {}
+            Err(e) => panic!("expected DataMissing, got {}", e),
+            Ok(_) => panic!("expected DataMissing, got Ok"),
+        }
     }
 
     #[test]
