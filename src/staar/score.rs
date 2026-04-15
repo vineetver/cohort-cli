@@ -316,6 +316,51 @@ pub fn run_staar_from_sumstats(
     )
 }
 
+/// Per-gene scratch for the STAAR test battery: weight vectors (length m),
+/// SKAT kernel buffer (m × m), and per-gene omnibus accumulators. Collects
+/// the allocations that used to be scattered across `staar_tests` so they
+/// can be sized once per gene instead of interleaved with the test loop.
+struct GeneScratch {
+    beta_1_25: Vec<f64>,
+    beta_1_1: Vec<f64>,
+    acat_denom: Vec<f64>,
+    wa_base_1_25: Vec<f64>,
+    wa_base_1_1: Vec<f64>,
+    wb_1_25: Vec<f64>,
+    wb_1_1: Vec<f64>,
+    ws_1_25: Vec<f64>,
+    ws_1_1: Vec<f64>,
+    wa_1_25: Vec<f64>,
+    wa_1_1: Vec<f64>,
+    kernel_buf: Mat<f64>,
+    by_test: [Vec<f64>; 6],
+    per_annotation: Vec<[f64; 6]>,
+    all_p: Vec<f64>,
+}
+
+impl GeneScratch {
+    fn with_capacity(m: usize, n_channels: usize) -> Self {
+        let mzeros = || vec![0.0; m];
+        Self {
+            beta_1_25: mzeros(),
+            beta_1_1: mzeros(),
+            acat_denom: mzeros(),
+            wa_base_1_25: mzeros(),
+            wa_base_1_1: mzeros(),
+            wb_1_25: mzeros(),
+            wb_1_1: mzeros(),
+            ws_1_25: mzeros(),
+            ws_1_1: mzeros(),
+            wa_1_25: mzeros(),
+            wa_1_1: mzeros(),
+            kernel_buf: Mat::zeros(m, m),
+            by_test: std::array::from_fn(|_| Vec::with_capacity(1 + n_channels)),
+            per_annotation: Vec::with_capacity(n_channels),
+            all_p: Vec::with_capacity(6 + n_channels * 6),
+        }
+    }
+}
+
 /// Shared test engine for both single-study and meta-analysis paths.
 /// Computes all 6 base tests, annotation-weighted variants, and omnibus combinations.
 ///
@@ -335,45 +380,25 @@ where
     BF: Fn(&[f64]) -> f64,
     AF: Fn(&[f64], &[f64]) -> f64,
 {
-    let beta_1_25: Vec<f64> = mafs
-        .iter()
-        .map(|&maf| beta_density_weight(maf, 1.0, 25.0))
-        .collect();
-    let beta_1_1: Vec<f64> = mafs
-        .iter()
-        .map(|&maf| beta_density_weight(maf, 1.0, 1.0))
-        .collect();
-    let acat_denom: Vec<f64> = mafs
-        .iter()
-        .map(|&maf| {
-            let d = beta_density_weight(maf, 0.5, 0.5);
-            if d > 0.0 {
-                d * d
-            } else {
-                1.0
-            }
-        })
-        .collect();
-
     let m = mafs.len();
-    let mut kernel_buf = Mat::zeros(m, m);
+    let n_channels = annotation_matrix.len();
+    let mut s = GeneScratch::with_capacity(m, n_channels);
 
-    let base_burden_1_25 = run_burden(&beta_1_25);
-    let base_burden_1_1 = run_burden(&beta_1_1);
-    let base_skat_1_25 = skat(u, k, &beta_1_25, sigma2, &mut kernel_buf);
-    let base_skat_1_1 = skat(u, k, &beta_1_1, sigma2, &mut kernel_buf);
-    let wa_base_1_25: Vec<f64> = beta_1_25
-        .iter()
-        .zip(&acat_denom)
-        .map(|(b, d)| b * b / d)
-        .collect();
-    let wa_base_1_1: Vec<f64> = beta_1_1
-        .iter()
-        .zip(&acat_denom)
-        .map(|(b, d)| b * b / d)
-        .collect();
-    let base_acat_v_1_25 = run_acat_v(&wa_base_1_25, &beta_1_25);
-    let base_acat_v_1_1 = run_acat_v(&wa_base_1_1, &beta_1_1);
+    for (j, &maf) in mafs.iter().enumerate() {
+        s.beta_1_25[j] = beta_density_weight(maf, 1.0, 25.0);
+        s.beta_1_1[j] = beta_density_weight(maf, 1.0, 1.0);
+        let d = beta_density_weight(maf, 0.5, 0.5);
+        s.acat_denom[j] = if d > 0.0 { d * d } else { 1.0 };
+        s.wa_base_1_25[j] = s.beta_1_25[j] * s.beta_1_25[j] / s.acat_denom[j];
+        s.wa_base_1_1[j] = s.beta_1_1[j] * s.beta_1_1[j] / s.acat_denom[j];
+    }
+
+    let base_burden_1_25 = run_burden(&s.beta_1_25);
+    let base_burden_1_1 = run_burden(&s.beta_1_1);
+    let base_skat_1_25 = skat(u, k, &s.beta_1_25, sigma2, &mut s.kernel_buf);
+    let base_skat_1_1 = skat(u, k, &s.beta_1_1, sigma2, &mut s.kernel_buf);
+    let base_acat_v_1_25 = run_acat_v(&s.wa_base_1_25, &s.beta_1_25);
+    let base_acat_v_1_1 = run_acat_v(&s.wa_base_1_1, &s.beta_1_1);
 
     let acat_o = stats::cauchy_combine(&[
         base_burden_1_25,
@@ -384,62 +409,52 @@ where
         base_acat_v_1_1,
     ]);
 
-    let n_channels = annotation_matrix.len();
-    let mut per_annotation: Vec<[f64; 6]> = Vec::with_capacity(n_channels);
-
     // Accumulate p-values per test type across annotation channels for STAAR omnibus.
     // Index order: Burden(1,25), Burden(1,1), SKAT(1,25), SKAT(1,1), ACAT-V(1,25), ACAT-V(1,1)
-    let mut by_test: [Vec<f64>; 6] = [
-        vec![base_burden_1_25],
-        vec![base_burden_1_1],
-        vec![base_skat_1_25],
-        vec![base_skat_1_1],
-        vec![base_acat_v_1_25],
-        vec![base_acat_v_1_1],
-    ];
-
-    let mut wb_1_25 = vec![0.0; m];
-    let mut wb_1_1 = vec![0.0; m];
-    let mut ws_1_25 = vec![0.0; m];
-    let mut ws_1_1 = vec![0.0; m];
-    let mut wa_1_25 = vec![0.0; m];
-    let mut wa_1_1 = vec![0.0; m];
+    s.by_test[0].push(base_burden_1_25);
+    s.by_test[1].push(base_burden_1_1);
+    s.by_test[2].push(base_skat_1_25);
+    s.by_test[3].push(base_skat_1_1);
+    s.by_test[4].push(base_acat_v_1_25);
+    s.by_test[5].push(base_acat_v_1_1);
 
     for channel_weights in annotation_matrix {
+        // Eight parallel slices indexed by j; a single range loop beats chaining
+        // seven zips. Keep the indexing form; clippy's range-loop lint disagrees.
+        #[allow(clippy::needless_range_loop)]
         for j in 0..m {
             let a = channel_weights[j];
             let a_sqrt = a.sqrt();
-            wb_1_25[j] = beta_1_25[j] * a;
-            wb_1_1[j] = beta_1_1[j] * a;
-            ws_1_25[j] = beta_1_25[j] * a_sqrt;
-            ws_1_1[j] = beta_1_1[j] * a_sqrt;
-            wa_1_25[j] = a * beta_1_25[j] * beta_1_25[j] / acat_denom[j];
-            wa_1_1[j] = a * beta_1_1[j] * beta_1_1[j] / acat_denom[j];
+            s.wb_1_25[j] = s.beta_1_25[j] * a;
+            s.wb_1_1[j] = s.beta_1_1[j] * a;
+            s.ws_1_25[j] = s.beta_1_25[j] * a_sqrt;
+            s.ws_1_1[j] = s.beta_1_1[j] * a_sqrt;
+            s.wa_1_25[j] = a * s.beta_1_25[j] * s.beta_1_25[j] / s.acat_denom[j];
+            s.wa_1_1[j] = a * s.beta_1_1[j] * s.beta_1_1[j] / s.acat_denom[j];
         }
 
         let p = [
-            run_burden(&wb_1_25),
-            run_burden(&wb_1_1),
-            skat(u, k, &ws_1_25, sigma2, &mut kernel_buf),
-            skat(u, k, &ws_1_1, sigma2, &mut kernel_buf),
-            run_acat_v(&wa_1_25, &wb_1_25),
-            run_acat_v(&wa_1_1, &wb_1_1),
+            run_burden(&s.wb_1_25),
+            run_burden(&s.wb_1_1),
+            skat(u, k, &s.ws_1_25, sigma2, &mut s.kernel_buf),
+            skat(u, k, &s.ws_1_1, sigma2, &mut s.kernel_buf),
+            run_acat_v(&s.wa_1_25, &s.wb_1_25),
+            run_acat_v(&s.wa_1_1, &s.wb_1_1),
         ];
-        for i in 0..6 {
-            by_test[i].push(p[i]);
+        for (bucket, pv) in s.by_test.iter_mut().zip(p.iter()) {
+            bucket.push(*pv);
         }
-        per_annotation.push(p);
+        s.per_annotation.push(p);
     }
 
-    let staar_b_1_25 = stats::cauchy_combine(&by_test[0]);
-    let staar_b_1_1 = stats::cauchy_combine(&by_test[1]);
-    let staar_s_1_25 = stats::cauchy_combine(&by_test[2]);
-    let staar_s_1_1 = stats::cauchy_combine(&by_test[3]);
-    let staar_a_1_25 = stats::cauchy_combine(&by_test[4]);
-    let staar_a_1_1 = stats::cauchy_combine(&by_test[5]);
+    let staar_b_1_25 = stats::cauchy_combine(&s.by_test[0]);
+    let staar_b_1_1 = stats::cauchy_combine(&s.by_test[1]);
+    let staar_s_1_25 = stats::cauchy_combine(&s.by_test[2]);
+    let staar_s_1_1 = stats::cauchy_combine(&s.by_test[3]);
+    let staar_a_1_25 = stats::cauchy_combine(&s.by_test[4]);
+    let staar_a_1_1 = stats::cauchy_combine(&s.by_test[5]);
 
-    let mut all_p: Vec<f64> = Vec::with_capacity(6 + n_channels * 6);
-    all_p.extend_from_slice(&[
+    s.all_p.extend_from_slice(&[
         base_burden_1_25,
         base_burden_1_1,
         base_skat_1_25,
@@ -447,10 +462,10 @@ where
         base_acat_v_1_25,
         base_acat_v_1_1,
     ]);
-    for p in &per_annotation {
-        all_p.extend_from_slice(p);
+    for p in &s.per_annotation {
+        s.all_p.extend_from_slice(p);
     }
-    let staar_o = stats::cauchy_combine(&all_p);
+    let staar_o = stats::cauchy_combine(&s.all_p);
 
     StaarResult {
         burden_1_25: base_burden_1_25,
@@ -459,7 +474,7 @@ where
         skat_1_1: base_skat_1_1,
         acat_v_1_25: base_acat_v_1_25,
         acat_v_1_1: base_acat_v_1_1,
-        per_annotation,
+        per_annotation: s.per_annotation,
         staar_b_1_25,
         staar_b_1_1,
         staar_s_1_25,
