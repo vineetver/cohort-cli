@@ -199,6 +199,35 @@ fn run(
                 dry_run,
             )
         }
+        Command::LdPrune {
+            cohort,
+            phenotype,
+            trait_name,
+            covariates,
+            variants,
+            maf_cutoff,
+            cond_p_thresh,
+            column_map,
+            output: output_path,
+        } => {
+            let engine = runtime::Engine::open(store_path)?;
+            commands::ld_prune::run(
+                &engine,
+                commands::ld_prune::LdPruneArgs {
+                    cohort,
+                    phenotype,
+                    trait_name,
+                    covariates,
+                    variants,
+                    maf_cutoff,
+                    cond_p_thresh,
+                    column_map,
+                    output: output_path,
+                },
+                out,
+                dry_run,
+            )
+        }
         Command::MetaStaar {
             studies,
             masks,

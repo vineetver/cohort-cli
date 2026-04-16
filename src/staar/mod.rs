@@ -6,6 +6,7 @@ mod ground_truth_test;
 #[cfg(test)]
 mod invariance_test;
 pub mod kinship;
+pub mod ld_prune;
 pub mod masks;
 pub mod meta;
 pub mod model;
