@@ -500,6 +500,12 @@ pub struct MetaVariant {
     pub mac_total: i64,
     pub n_total: i64,
     pub study_segments: Vec<(usize, i32)>,
+    /// Per-study score statistics signed to the canonical (lex-min) ref/alt
+    /// orientation. Required for the heterogeneous meta-analysis path that
+    /// conditions each study separately before summing. Empty on legacy
+    /// sumstats that were written before this column existed; the
+    /// homogeneous path consumes `u_meta` instead.
+    pub u_study: Vec<(usize, f64)>,
 }
 
 #[cfg(test)]

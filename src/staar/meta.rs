@@ -406,7 +406,10 @@ pub fn merge_chromosome(
              bool_or({ccre_p}) AS {ccre_p}, \
              bool_or({ccre_e}) AS {ccre_e}, \
              {weight_aggs}, \
-             CAST(array_agg(named_struct('s', study_idx, 'seg', segment_id)) AS VARCHAR) AS study_segs \
+             CAST(array_agg(named_struct('s', study_idx, 'seg', segment_id)) AS VARCHAR) AS study_segs, \
+             CAST(array_agg(named_struct('s', study_idx, \
+                                         'u', CASE WHEN {ref_a} <= {alt_a} THEN u_stat ELSE -u_stat END)) \
+                  AS VARCHAR) AS study_us \
          FROM _study_variants \
          WHERE {maf} < {maf_cutoff} \
          GROUP BY {pos}, \
@@ -428,7 +431,7 @@ pub fn merge_chromosome(
          cadd_phred_raw, {revel}, {msp}, {gh}, \
          {cage_p}, {cage_e}, {ccre_p}, {ccre_e}, \
          {weight_select}, \
-         study_segs \
+         study_segs, study_us \
          FROM _meta_variants ORDER BY {pos}",
         pos = Col::Position,
         ref_a = Col::RefAllele,
@@ -512,6 +515,7 @@ pub fn merge_chromosome(
             w_arrs.push(f64_col(17 + i)?);
         }
         let segs_arr = str_col(28)?;
+        let study_u_arr = str_col(29)?;
 
         for i in 0..n {
             let mut weights = [0.0f64; 11];
@@ -521,6 +525,7 @@ pub fn merge_chromosome(
             let cadd_phred = f64_or(cadd_raw_arr, i, 0.0);
 
             let study_segments = parse_study_segments(str_or(segs_arr, i, ""));
+            let u_study = parse_study_us(str_or(study_u_arr, i, ""));
 
             let mac_total = i64_or(mac_arr, i, 0);
             let n_total = i64_or(n_obs_arr, i, 0);
@@ -559,6 +564,7 @@ pub fn merge_chromosome(
                 mac_total,
                 n_total,
                 study_segments,
+                u_study,
             });
         }
     }
@@ -671,6 +677,7 @@ pub fn meta_score_gene(
             n_variants: m as u32,
             cumulative_mac: cmac as u32,
             staar: sr,
+            emthr: f64::NAN,
         },
         burden_beta,
         burden_se,
@@ -745,6 +752,34 @@ fn parse_study_segments(s: &str) -> Vec<(usize, i32)> {
         }
         if let (Some(s), Some(g)) = (study, seg) {
             result.push((s, g));
+        }
+    }
+    result
+}
+
+/// Parse DuckDB's stringified `array_agg(named_struct('s',..,'u',..))` into
+/// `(study_idx, signed_u)` pairs. Mirrors `parse_study_segments` byte-for-byte
+/// save for the 'u' value being a float rather than an integer segment id.
+fn parse_study_us(s: &str) -> Vec<(usize, f64)> {
+    let mut result = Vec::new();
+    for part in s.split('{') {
+        let part =
+            part.trim_matches(|c: char| c == '[' || c == ']' || c == ',' || c == ' ' || c == '}');
+        if part.is_empty() {
+            continue;
+        }
+        let mut study: Option<usize> = None;
+        let mut u: Option<f64> = None;
+        for kv in part.split(',') {
+            let kv = kv.trim();
+            if let Some(val) = kv.strip_prefix("s:").or_else(|| kv.strip_prefix("s :")) {
+                study = val.trim().parse().ok();
+            } else if let Some(val) = kv.strip_prefix("u:").or_else(|| kv.strip_prefix("u :")) {
+                u = val.trim().parse().ok();
+            }
+        }
+        if let (Some(s), Some(u)) = (study, u) {
+            result.push((s, u));
         }
     }
     result
@@ -1215,27 +1250,23 @@ pub fn parse_known_loci_file(
 }
 
 /// Conditional meta-analysis: condition gene-level U/K on known loci
-/// before running STAAR tests.
-///
-/// Homogeneous model: condition the merged (cross-study) U and K.
-/// Heterogeneous model: condition per-study U and K before merging.
-///
-/// The conditioning step uses Schur complement:
-///   U_cond = U_t - K_tc * K_cc^{-1} * U_c
-///   K_cond = K_tt - K_tc * K_cc^{-1} * K_ct
-///
+/// before running STAAR tests. Schur complement:
+///   U_cond = U_t - K_tc · K_cc⁻¹ · U_c
+///   K_cond = K_tt - K_tc · K_cc⁻¹ · K_ct
 /// where t = test (gene) variants, c = conditioning (known loci) variants.
-/// Conditional meta-scoring uses the homogeneous model: condition the
-/// merged (cross-study) U and K on known-loci variants via Schur complement.
-/// The heterogeneous model (per-study conditioning) is rejected at config
-/// time because --emit-sumstats does not yet persist per-study U vectors.
+///
+/// Homogeneous model sums U and K across studies before the Schur solve.
+/// Heterogeneous model does the Schur solve inside each study first and
+/// sums per-study (U_cond_i, K_cond_i) at the end, matching MetaSTAAR
+/// R/MetaSTAAR_merge_cond.R:391-404 and tolerating per-study variation in
+/// covariate-adjusted residual variance.
 pub fn meta_score_gene_conditional(
     group: &MaskGroup,
     meta_variants: &[MetaVariant],
     studies: &[StudyHandle],
     segment_cache: &HashMap<(usize, i32), SegmentCov>,
     known_loci_indices: &[usize],
-    _heterogeneous: bool,
+    heterogeneous: bool,
 ) -> Option<MetaGeneResult> {
     let gene_indices: Vec<usize> = group
         .variant_indices
@@ -1264,19 +1295,12 @@ pub fn meta_score_gene_conditional(
     let m_t = gene_indices.len();
     let m_c = cond_indices.len();
 
-    // Build combined keys: [gene variants | conditioning variants].
     let combined: Vec<usize> = gene_indices
         .iter()
         .chain(cond_indices.iter())
         .copied()
         .collect();
     let m_all = combined.len();
-
-    // Homogeneous: condition merged U/K.
-    let mut u_all = Mat::zeros(m_all, 1);
-    for (local, &gi) in combined.iter().enumerate() {
-        u_all[(local, 0)] = meta_variants[gi].u_meta;
-    }
 
     let keys: Vec<(u32, &str, &str)> = combined
         .iter()
@@ -1288,6 +1312,46 @@ pub fn meta_score_gene_conditional(
             )
         })
         .collect();
+
+    if heterogeneous {
+        // Mirrors MetaSTAAR R/MetaSTAAR_merge_cond.R:391-404.
+        // Each study conditions its own (U_i, K_i) via Schur complement;
+        // the per-study conditional pair is summed across studies. Studies
+        // with no overlap on a variant contribute zero U and zero K for
+        // that row / column, so they drop out of the Schur solve naturally.
+        let mut u_cond_sum = Mat::zeros(m_t, 1);
+        let mut k_cond_sum = Mat::zeros(m_t, m_t);
+
+        for study_idx in 0..studies.len() {
+            let (u_study, cov_study) = build_study_u_cov(
+                study_idx,
+                &combined,
+                meta_variants,
+                segment_cache,
+                &keys,
+            );
+
+            let (u_t_i, k_tt_i, u_c_i, k_cc_i, k_tc_i) =
+                partition_u_cov(&u_study, &cov_study, m_t, m_c);
+            let (u_cond_i, k_cond_i) =
+                schur_condition(&u_t_i, &k_tt_i, &u_c_i, &k_cc_i, &k_tc_i);
+
+            for i in 0..m_t {
+                u_cond_sum[(i, 0)] += u_cond_i[(i, 0)];
+                for j in 0..m_t {
+                    k_cond_sum[(i, j)] += k_cond_i[(i, j)];
+                }
+            }
+        }
+
+        return finish_conditional(&gene_indices, meta_variants, &u_cond_sum, &k_cond_sum, group);
+    }
+
+    // Homogeneous: condition merged U/K.
+    let mut u_all = Mat::zeros(m_all, 1);
+    for (local, &gi) in combined.iter().enumerate() {
+        u_all[(local, 0)] = meta_variants[gi].u_meta;
+    }
 
     let mut cov_all = Mat::zeros(m_all, m_all);
     for study_idx in 0..studies.len() {
@@ -1316,6 +1380,50 @@ pub fn meta_score_gene_conditional(
     let (u_cond, k_cond) = schur_condition(&u_t, &k_tt, &u_c, &k_cc, &k_tc);
 
     finish_conditional(&gene_indices, meta_variants, &u_cond, &k_cond, group)
+}
+
+/// Build one study's (U, K) across the combined variant list. Variants not
+/// present in the study contribute zero; segments absent from the cache
+/// contribute zero (same fallback as the homogeneous accumulator).
+fn build_study_u_cov(
+    study_idx: usize,
+    combined: &[usize],
+    meta_variants: &[MetaVariant],
+    segment_cache: &HashMap<(usize, i32), SegmentCov>,
+    keys: &[(u32, &str, &str)],
+) -> (Mat<f64>, Mat<f64>) {
+    let m_all = combined.len();
+    let mut u = Mat::zeros(m_all, 1);
+    for (local, &gi) in combined.iter().enumerate() {
+        for &(s, val) in &meta_variants[gi].u_study {
+            if s == study_idx {
+                u[(local, 0)] = val;
+                break;
+            }
+        }
+    }
+
+    let mut cov = Mat::zeros(m_all, m_all);
+    let mut needed: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for &gi in combined {
+        for &(s, seg_id) in &meta_variants[gi].study_segments {
+            if s == study_idx {
+                needed.insert(seg_id);
+            }
+        }
+    }
+    for seg_id in needed {
+        if let Some(seg) = segment_cache.get(&(study_idx, seg_id)) {
+            let sub = seg.extract_submatrix(keys);
+            for i in 0..m_all {
+                for j in 0..m_all {
+                    cov[(i, j)] += sub[(i, j)];
+                }
+            }
+        }
+    }
+
+    (u, cov)
 }
 
 /// Partition combined U and K into test (t) and conditioning (c) blocks.
@@ -1442,6 +1550,7 @@ fn finish_conditional(
             n_variants: m_t as u32,
             cumulative_mac: cmac as u32,
             staar: sr,
+            emthr: f64::NAN,
         },
         burden_beta,
         burden_se,
@@ -1562,6 +1671,7 @@ mod tests {
                 mac_total: (2.0 * mafs[i] * n as f64).round() as i64,
                 n_total: n as i64,
                 study_segments: vec![(0, 0)],
+                u_study: vec![(0, u[(i, 0)])],
             })
             .collect();
 
@@ -1674,6 +1784,7 @@ mod tests {
                 mac_total: (2.0 * mafs[i] * n as f64).round() as i64,
                 n_total: n as i64,
                 study_segments: vec![(0, 10), (1, 20)],
+                u_study: vec![(0, half_u[(i, 0)]), (1, half_u[(i, 0)])],
             })
             .collect();
 

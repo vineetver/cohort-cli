@@ -227,6 +227,7 @@ pub fn load_from_file(path: &Path) -> Result<NullModel, CohortError> {
         fitted_values,
         working_weights,
         kinship: None,
+        scang: None,
     })
 }
 
@@ -297,6 +298,7 @@ mod tests {
             fitted_values: None,
             working_weights: None,
             kinship: None,
+            scang: None,
         }
     }
 

@@ -13,6 +13,7 @@ pub mod multi;
 pub mod output;
 pub mod pipeline;
 pub mod run_manifest;
+pub mod scang;
 pub mod score;
 pub mod scoring;
 pub mod stats;
@@ -152,4 +153,9 @@ pub struct GeneResult {
     pub n_variants: u32,
     pub cumulative_mac: u32,
     pub staar: score::StaarResult,
+    /// SCANG-O empirical −log10(p) threshold at α = 0.05, NaN otherwise.
+    /// Emitted alongside per-window p-values so operators can cross-check
+    /// `-log10(p) > emthr` matches the R `SCANG_O_res$th0` gate. See
+    /// `crate::staar::scang::chrom_threshold` and SCANG R/SCANG.r:181-205.
+    pub emthr: f64,
 }

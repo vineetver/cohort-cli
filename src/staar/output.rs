@@ -284,6 +284,10 @@ fn mask_results_schema(channels: &[&str]) -> Schema {
     }
     fields.push(Field::new("ACAT-O", DataType::Float64, true));
     fields.push(Field::new("STAAR-O", DataType::Float64, true));
+    // SCANG-only empirical −log10(p) threshold; NaN elsewhere. Stays on
+    // the shared schema so downstream readers never have to branch on
+    // mask type to know whether the column exists.
+    fields.push(Field::new("emthr", DataType::Float64, true));
     Schema::new(fields)
 }
 
@@ -308,6 +312,7 @@ fn build_mask_columns(sorted: &[&GeneResult], n_channels: usize) -> Vec<ArrayRef
         .collect();
     let mut b_acat_o = Float64Builder::with_capacity(nr);
     let mut b_staar_o = Float64Builder::with_capacity(nr);
+    let mut b_emthr = Float64Builder::with_capacity(nr);
 
     for r in sorted {
         let s = &r.staar;
@@ -354,6 +359,7 @@ fn build_mask_columns(sorted: &[&GeneResult], n_channels: usize) -> Vec<ArrayRef
         }
         b_acat_o.append_value(s.acat_o);
         b_staar_o.append_value(s.staar_o);
+        b_emthr.append_value(r.emthr);
     }
 
     let mut columns: Vec<ArrayRef> = vec![
@@ -370,6 +376,7 @@ fn build_mask_columns(sorted: &[&GeneResult], n_channels: usize) -> Vec<ArrayRef
     }
     columns.push(Arc::new(b_acat_o.finish()));
     columns.push(Arc::new(b_staar_o.finish()));
+    columns.push(Arc::new(b_emthr.finish()));
     columns
 }
 
@@ -1056,6 +1063,7 @@ mod tests {
                 acat_o: p,
                 staar_o: p,
             },
+            emthr: f64::NAN,
         }
     }
 
