@@ -315,6 +315,48 @@ pub enum Command {
         output: Option<PathBuf>,
     },
 
+    /// Forward-selection LD pruning on conditional score-test p-values
+    #[command(name = "ld-prune")]
+    LdPrune {
+        /// Pre-built cohort id (under the store root).
+        #[arg(long)]
+        cohort: String,
+
+        /// Phenotype file (TSV with sample_id as first column)
+        #[arg(long)]
+        phenotype: PathBuf,
+
+        /// Trait column name in the phenotype file
+        #[arg(long)]
+        trait_name: String,
+
+        /// Covariate columns (comma-separated, e.g. age,sex,PC1,PC2)
+        #[arg(long, value_delimiter = ',')]
+        covariates: Vec<String>,
+
+        /// Candidate variants file. Tab-delimited or colon-delimited with
+        /// four fields per row: CHR POS REF ALT. `#`-prefixed lines skipped.
+        #[arg(long)]
+        variants: PathBuf,
+
+        /// Minor allele frequency floor for candidates (default 0.01)
+        #[arg(long, default_value = "0.01")]
+        maf_cutoff: f64,
+
+        /// Conditional p-value threshold at which forward selection stops
+        /// (default 1e-4, matches STAARpipeline LD_pruning).
+        #[arg(long, default_value = "1e-4")]
+        cond_p_thresh: f64,
+
+        /// Column name mapping for phenotype file (key=value pairs)
+        #[arg(long, value_delimiter = ',')]
+        column_map: Vec<String>,
+
+        /// Output TSV path (default: <cohort>.ld_pruned.tsv)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Meta-analysis of STAAR across studies (MetaSTAAR)
     #[command(name = "meta-staar")]
     MetaStaar {

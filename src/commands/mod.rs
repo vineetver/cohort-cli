@@ -4,6 +4,7 @@ pub mod enrich;
 pub mod ingest;
 pub mod inspect;
 pub mod interpret;
+pub mod ld_prune;
 pub mod meta_staar;
 pub mod staar;
 pub mod store;
