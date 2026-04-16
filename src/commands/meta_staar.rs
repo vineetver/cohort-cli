@@ -44,14 +44,6 @@ pub fn build_config(
                 loci.display()
             )));
         }
-        if matches!(conditional_model, crate::cli::ConditionalModel::Heterogeneous) {
-            return Err(CohortError::Input(
-                "--conditional-model heterogeneous requires per-study U vectors \
-                 which --emit-sumstats does not yet persist. Use --conditional-model \
-                 homogeneous for now."
-                    .into(),
-            ));
-        }
     }
 
     let mask_categories = crate::commands::parse_mask_categories(&masks)?;

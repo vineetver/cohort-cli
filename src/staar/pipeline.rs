@@ -289,7 +289,7 @@ impl<'a> StaarPipeline<'a> {
         store: &GenoStoreResult,
         pheno: &PhenoStageOut,
     ) -> Result<(), CohortError> {
-        let null_model = self.stage(Stage::FitNullModel, |p| {
+        let mut null_model = self.stage(Stage::FitNullModel, |p| {
             p.stage_fit_null_model(pheno, store)
         })?;
 
@@ -300,6 +300,21 @@ impl<'a> StaarPipeline<'a> {
             })?;
             self.manifest.write(&self.config.output_dir)?;
             return Ok(());
+        }
+
+        // Populate the SCANG Monte Carlo pseudo-residuals before scoring
+        // so the per-chromosome threshold reuses the same null draws across
+        // chromosomes. Gated on mask selection and the unrelated continuous
+        // path the sampler supports.
+        if self.config.mask_categories.contains(&MaskCategory::Scang)
+            && pheno.trait_type == TraitType::Continuous
+            && !self.config.has_kinship()
+        {
+            staar::scang::ensure_unrelated(
+                &mut null_model,
+                staar::scang::SCANG_DEFAULT_TIMES,
+                staar::scang::SCANG_SEED,
+            )?;
         }
 
         let analysis = AnalysisVectors::from_null_model(&null_model, &pheno.pheno_mask)?;
@@ -313,6 +328,10 @@ impl<'a> StaarPipeline<'a> {
         let scoring_mode = self.config.scoring_mode(pheno.trait_type);
         self.warn_mode_combinations(pheno.trait_type, scoring_mode);
 
+        let scang_pseudo = null_model
+            .scang
+            .as_ref()
+            .map(|ext| &ext.pseudo_residuals);
         let scoring = self.stage(Stage::RunScoring, |p| {
             p.stage_run_scoring(
                 store,
@@ -321,6 +340,7 @@ impl<'a> StaarPipeline<'a> {
                 &cache_dir,
                 pheno.ancestry.as_ref(),
                 pheno.trait_type,
+                scang_pseudo,
             )
         })?;
 
@@ -750,6 +770,7 @@ impl<'a> StaarPipeline<'a> {
             fitted_values: None,
             working_weights: None,
             kinship: Some(state),
+            scang: None,
         })
     }
 
@@ -933,6 +954,7 @@ impl<'a> StaarPipeline<'a> {
         Ok(dir)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage_run_scoring(
         &mut self,
         store: &GenoStoreResult,
@@ -941,6 +963,7 @@ impl<'a> StaarPipeline<'a> {
         cache_dir: &Path,
         ancestry: Option<&AncestryInfo>,
         trait_type: TraitType,
+        scang_pseudo_residuals: Option<&Mat<f64>>,
     ) -> Result<ScoringOutput, CohortError> {
         let request = ScoringRequest {
             mask_categories: &self.config.mask_categories,
@@ -957,6 +980,9 @@ impl<'a> StaarPipeline<'a> {
                 && trait_type == TraitType::Continuous
                 && !self.config.has_kinship(),
             individual_mac_cutoff: 20,
+            scang_pseudo_residuals,
+            scang_alpha: staar::scang::SCANG_DEFAULT_ALPHA,
+            scang_filter: staar::scang::SCANG_DEFAULT_FILTER,
         };
         let (results, individual) = scoring::run_score_tests(
             &self.cohort(),

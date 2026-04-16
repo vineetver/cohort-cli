@@ -505,6 +505,9 @@ pub struct NullModel {
     /// Kinship-aware variance components and projection. Set when `--kinship`
     /// is in use; the score path then dispatches to the kinship-aware kernel.
     pub kinship: Option<KinshipState>,
+    /// SCANG-side state populated lazily once a run needs Monte Carlo
+    /// thresholds. See `crate::staar::scang::ScangExt`.
+    pub scang: Option<crate::staar::scang::ScangExt>,
 }
 
 impl NullModel {
@@ -603,6 +606,7 @@ pub fn fit_glm(y: &Mat<f64>, x: &Mat<f64>) -> NullModel {
         fitted_values: None,
         working_weights: None,
         kinship: None,
+        scang: None,
     }
 }
 
@@ -704,6 +708,7 @@ pub fn fit_logistic(y: &Mat<f64>, x: &Mat<f64>, max_iter: usize) -> NullModel {
         fitted_values: Some(fitted),
         working_weights: Some(w_final),
         kinship: None,
+        scang: None,
     }
 }
 

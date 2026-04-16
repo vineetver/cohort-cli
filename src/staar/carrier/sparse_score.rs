@@ -405,6 +405,7 @@ pub(crate) fn null_model_from_analysis(analysis: &AnalysisVectors) -> NullModel 
         // a dense G and a non-mixed-model NullModel. Kinship-aware analyses
         // route through `score_gene_sparse_kinship` directly.
         kinship: None,
+        scang: None,
     }
 }
 

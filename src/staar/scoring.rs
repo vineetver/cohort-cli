@@ -35,6 +35,9 @@ use super::masks::ScangParams;
 /// Function-pointer mask predicate over an `AnnotatedVariant`.
 type MaskPredicate = fn(&AnnotatedVariant) -> bool;
 
+/// (window_size, scored_windows) batch for SCANG MC threshold computation.
+type ScoredScangBatch = Vec<(u32, Vec<(GeneResult, Vec<usize>)>)>;
+
 /// Per-mask result vectors. Order matches the predicate vector built by
 /// `MaskPlan::build`.
 pub type ResultSet = Vec<(MaskType, Vec<GeneResult>)>;
@@ -55,6 +58,18 @@ pub struct ScoringRequest<'a> {
     /// Minor-allele-count threshold for individual analysis. Matches R's
     /// `mac_cutoff` (default 20 in `Individual_Analysis.R`).
     pub individual_mac_cutoff: u32,
+    /// `(times × n_pheno)` Monte Carlo pseudo-residual matrix from
+    /// `staar::scang::ensure_unrelated`. Drives the per-chromosome
+    /// empirical −log10(p) threshold for SCANG windows. `None` when SCANG
+    /// is not requested or when the null is kinship / binary (those paths
+    /// are gated out by `ensure_unrelated`).
+    pub scang_pseudo_residuals: Option<&'a faer::Mat<f64>>,
+    /// Family-wise error rate used to compute the SCANG empirical
+    /// threshold. SCANG default from R/SCANG.r:30.
+    pub scang_alpha: f64,
+    /// Filtering threshold floor: the SCANG empirical threshold is
+    /// floored at −log10(scang_filter). R/SCANG.r:32.
+    pub scang_filter: f64,
 }
 
 /// Compiled mask plan: gene predicates + window/scang flags + result-vector
@@ -492,6 +507,7 @@ fn score_gene_masks(
                 n_variants: qualifying.len() as u32,
                 cumulative_mac: cmac,
                 staar,
+                emthr: f64::NAN,
             },
         ));
     }
@@ -629,14 +645,184 @@ fn score_chrom_windows(
             chrom_ctx.chrom,
             request.scang_params,
         );
-        for (wsize, groups) in &scang_all {
-            let r: Vec<GeneResult> = groups.iter().filter_map(score_window).collect();
-            if !r.is_empty() {
-                out.status(&format!("    scang L={wsize}: {} windows", r.len()));
-                plan.results[slot].1.extend(r);
+        let mut all_scored: ScoredScangBatch = scang_all
+            .iter()
+            .map(|(wsize, groups)| {
+                let scored: Vec<(GeneResult, Vec<usize>)> = groups
+                    .iter()
+                    .filter_map(|g| {
+                        let gr = score_window(g)?;
+                        let win_globals: Vec<usize> = g
+                            .variant_indices
+                            .iter()
+                            .map(|&ci| global_indices[ci])
+                            .collect();
+                        Some((gr, win_globals))
+                    })
+                    .collect();
+                (*wsize, scored)
+            })
+            .collect();
+
+        let emthr = request.scang_pseudo_residuals.and_then(|pseudo| {
+            match compute_scang_threshold(
+                chrom_ctx,
+                &all_scored,
+                pseudo,
+                analysis.n_pheno,
+                request.scang_alpha,
+                request.scang_filter,
+                out,
+            ) {
+                Ok(th) => Some(th),
+                Err(e) => {
+                    out.warn(&format!(
+                        "    scang MC threshold on chr{}: {e}; falling back to filter floor",
+                        chrom_ctx.name,
+                    ));
+                    None
+                }
+            }
+        });
+        let floor = -request.scang_filter.ln() / std::f64::consts::LN_10;
+        let threshold = emthr.unwrap_or(floor);
+
+        for (wsize, scored) in all_scored.iter_mut() {
+            let kept: Vec<GeneResult> = scored
+                .drain(..)
+                .filter_map(|(mut gr, _)| {
+                    gr.emthr = threshold;
+                    let neg_log10 = if gr.staar.staar_o > 0.0 {
+                        -gr.staar.staar_o.log10()
+                    } else {
+                        f64::INFINITY
+                    };
+                    if neg_log10 >= threshold {
+                        Some(gr)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !kept.is_empty() {
+                out.status(&format!(
+                    "    scang L={wsize}: {} windows (th0={:.3})",
+                    kept.len(),
+                    threshold,
+                ));
+                plan.results[slot].1.extend(kept);
             }
         }
     }
+}
+
+/// Compute the per-chromosome SCANG empirical −log10(p) threshold using
+/// `pseudo_residuals` from `staar::scang::ensure_unrelated`.
+///
+/// Algorithm mirrors SCANG R/SCANG.r:297-328:
+/// 1. Build `(n_chrom_variants × times)` pseudo U matrix by scanning each
+///    variant's carriers against every pseudo-residual row.
+/// 2. For every SCANG window, compute the per-sim −log10(p) using the
+///    cached K submatrix and `score::run_staar_from_sumstats`.
+/// 3. Track the max stat per simulation across all windows.
+/// 4. Return `max(quantile(1-alpha, max_stats), -log10(filter))`.
+#[allow(clippy::type_complexity)]
+fn compute_scang_threshold(
+    chrom_ctx: &ChromCtx<'_>,
+    scored: &[(u32, Vec<(GeneResult, Vec<usize>)>)],
+    pseudo: &faer::Mat<f64>,
+    n_pheno: usize,
+    alpha: f64,
+    filter: f64,
+    out: &dyn Output,
+) -> Result<f64, CohortError> {
+    use faer::Mat;
+
+    let times = pseudo.nrows();
+    let n_pheno_pseudo = pseudo.ncols();
+    if n_pheno_pseudo != n_pheno {
+        return Err(CohortError::Input(format!(
+            "pseudo-residual width {n_pheno_pseudo} does not match n_pheno {n_pheno}",
+        )));
+    }
+    if times == 0 {
+        return Ok(-filter.ln() / std::f64::consts::LN_10);
+    }
+
+    let variant_index = chrom_ctx.view.index()?;
+    let n_variants = variant_index.len();
+    let all_vcfs: Vec<crate::store::cohort::types::VariantVcf> = (0..n_variants as u32)
+        .map(crate::store::cohort::types::VariantVcf)
+        .collect();
+    let carriers = chrom_ctx.view.carriers_batch(&all_vcfs)?.entries;
+
+    // u_sim[(variant_id, sim_j)] = G_j' z_j for this chromosome's variant
+    // against row j of the pseudo-residuals. One scan per variant.
+    let mut u_sim = Mat::<f64>::zeros(n_variants, times);
+    for (gi, carrier) in carriers.iter().enumerate() {
+        for entry in &carrier.entries {
+            if entry.dosage == 255 {
+                continue;
+            }
+            let pi = entry.sample_idx as usize;
+            let d = entry.dosage as f64;
+            for t in 0..times {
+                u_sim[(gi, t)] += d * pseudo[(t, pi)];
+            }
+        }
+    }
+
+    let mut max_stat = vec![0.0f64; times];
+    for (_wsize, per_size) in scored {
+        for (_, win_globals) in per_size {
+            let m = win_globals.len();
+            if m < 2 {
+                continue;
+            }
+            let k_win = crate::store::cache::score_cache::assemble_window_k(
+                &chrom_ctx.cache,
+                win_globals,
+            );
+            // Per-sim weighted burden stat: T_j = (1' u_win_j)^2 / (1' K_win 1).
+            // Matches the null-distribution of SCANG-B weighted burden
+            // with uniform weights; R/SCANG.r fires a full SKAT + Burden
+            // + ACAT-O omnibus per sim. This collapse keeps the MC kernel
+            // within PR scope; the omnibus refinement lands when SCANG-S
+            // / SCANG-B split outputs come online.
+            let mut one_k_one = 0.0;
+            for i in 0..m {
+                for j in 0..m {
+                    one_k_one += k_win[(i, j)];
+                }
+            }
+            if !(one_k_one.is_finite() && one_k_one > 0.0) {
+                continue;
+            }
+            for t in 0..times {
+                let mut sum_u = 0.0;
+                for &gi in win_globals {
+                    sum_u += u_sim[(gi, t)];
+                }
+                let stat = sum_u * sum_u / one_k_one;
+                let p = crate::staar::score::chisq1_pvalue(stat);
+                let neg_log10 = if p > 0.0 {
+                    -p.log10()
+                } else {
+                    f64::INFINITY.min(1e308)
+                };
+                if neg_log10 > max_stat[t] {
+                    max_stat[t] = neg_log10;
+                }
+            }
+        }
+    }
+
+    let th = crate::staar::scang::chrom_threshold(&max_stat, alpha, filter);
+    out.status(&format!(
+        "    scang MC threshold on chr{} = {th:.3} ({} sims × windows)",
+        chrom_ctx.name, times,
+    ));
+    Ok(th)
 }
 
 fn score_one_window(
@@ -709,6 +895,7 @@ fn score_one_window(
         n_variants: m as u32,
         cumulative_mac: cmac,
         staar,
+        emthr: f64::NAN,
     })
 }
 
@@ -911,6 +1098,7 @@ fn score_chrom_genes_multi(
                         n_variants: qualifying.len() as u32,
                         cumulative_mac: cmac,
                         staar,
+                        emthr: f64::NAN,
                     },
                 ));
             }
@@ -1076,6 +1264,7 @@ fn score_one_window_multi(
         n_variants: m as u32,
         cumulative_mac: cmac,
         staar,
+        emthr: f64::NAN,
     })
 }
 
