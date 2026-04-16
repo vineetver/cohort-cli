@@ -21,6 +21,25 @@ pub struct AncestryInfo {
 }
 
 impl AncestryInfo {
+    /// Ground-truth tests load the R-generated ensemble weights verbatim so
+    /// the port stays bit-comparable despite R/Rust PRNG drift.
+    #[cfg(test)]
+    pub fn from_weights(
+        group: Vec<usize>,
+        pop_weights_1_1: Vec<Vec<f64>>,
+        pop_weights_1_25: Vec<Vec<f64>>,
+    ) -> Self {
+        let n_pops = pop_weights_1_1.len();
+        debug_assert_eq!(pop_weights_1_25.len(), n_pops);
+        debug_assert!(group.iter().all(|&g| g < n_pops));
+        Self {
+            group,
+            n_pops,
+            pop_weights_1_1,
+            pop_weights_1_25,
+        }
+    }
+
     pub fn new(group: Vec<usize>, n_pops: usize, n_base_tests: usize, seed: u64) -> Self {
         // Column 0 is the all-ones MAF-only run; columns 1..=B are |N(0,1)|
         // ensemble weights drawn deterministically from `seed`. The two
