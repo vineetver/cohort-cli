@@ -6,7 +6,8 @@
 .DS_Store
 .env
 .claude/
-/scripts/
+/scripts/*
+!/scripts/r/
 
 CLAUDE.md
 testdata/
