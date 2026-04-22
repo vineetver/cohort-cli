@@ -2,8 +2,11 @@
 
 pub mod detect;
 pub mod format;
+pub mod reader;
 pub mod sql;
 pub mod vcf;
+
+pub use reader::{RawRecord, VariantReader};
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;

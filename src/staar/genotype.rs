@@ -22,7 +22,7 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CohortError;
-use crate::ingest::vcf::{ascii_uppercase_into, normalize_chrom, open_vcf, parsimony_normalize};
+use crate::ingest::vcf::open_vcf;
 use crate::output::Output;
 
 #[derive(Serialize, Deserialize)]
@@ -49,24 +49,27 @@ pub fn extract_genotypes(
         return Err(CohortError::Input("No VCF files provided.".into()));
     }
 
-    let reader = open_vcf(&vcf_paths[0], threads)?;
-    let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-    let header = vcf_reader
-        .read_header()
-        .map_err(|e| CohortError::Input(format!("VCF header: {e}")))?;
-
-    let sample_names: Vec<String> = header
-        .sample_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let sample_names = read_sample_names(&vcf_paths[0])?;
     let n_samples = sample_names.len();
     if n_samples == 0 {
         return Err(CohortError::Input(
             "VCF has no samples. STAAR requires a multi-sample VCF.".into(),
         ));
     }
-    drop(vcf_reader);
+
+    for vcf_path in &vcf_paths[1..] {
+        let file_samples = read_sample_names(vcf_path)?;
+        if file_samples != sample_names {
+            return Err(CohortError::Input(format!(
+                "Sample mismatch: '{}' has {} samples but '{}' has {}. \
+                 All VCF files must have identical samples in the same order.",
+                vcf_paths[0].display(),
+                sample_names.len(),
+                vcf_path.display(),
+                file_samples.len()
+            )));
+        }
+    }
 
     output.status(&format!(
         "Extracting genotypes: {} samples, {} file(s), {} threads, {:.1}G memory",
@@ -79,66 +82,14 @@ pub fn extract_genotypes(
     let geno_dir = output_dir.join("genotypes");
     let mut gw = GenotypeWriter::new(n_samples, &geno_dir, available_memory)?;
 
-    let mut finished_chroms: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut ref_buf = String::with_capacity(256);
-    let mut alt_buf = String::with_capacity(256);
-    let pb = output.progress(0, "extracting genotypes");
-
-    for (file_idx, vcf_path) in vcf_paths.iter().enumerate() {
-        let reader = open_vcf(vcf_path, threads)?;
-        let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-        let file_header = vcf_reader
-            .read_header()
-            .map_err(|e| CohortError::Input(format!("VCF header in '{}': {e}", vcf_path.display())))?;
-
-        if file_idx > 0 {
-            let file_samples: Vec<String> = file_header
-                .sample_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            if file_samples != sample_names {
-                return Err(CohortError::Input(format!(
-                    "Sample mismatch: '{}' has {} samples but '{}' has {}. \
-                     All VCF files must have identical samples in the same order.",
-                    vcf_paths[0].display(),
-                    sample_names.len(),
-                    vcf_path.display(),
-                    file_samples.len()
-                )));
-            }
-        }
-
-        for result in vcf_reader.records() {
-            let record = result.map_err(|e| {
-                CohortError::Analysis(format!("VCF parse error in '{}': {e}", vcf_path.display()))
-            })?;
-
-            let raw_chrom = record.reference_sequence_name();
-            if let Some(chrom) = normalize_chrom(raw_chrom) {
-                if gw.current_chrom.as_deref() != Some(chrom) && finished_chroms.contains(chrom) {
-                    return Err(CohortError::Input(format!(
-                        "Chromosome {chrom} appears in '{}' but its writer was already \
-                         closed after processing an earlier file. Sort VCF files by \
-                         chromosome or use one file per chromosome.",
-                        vcf_path.display()
-                    )));
-                }
-            }
-
-            process_record_geno(&record, &mut gw, &mut ref_buf, &mut alt_buf, output)?;
-            pb.inc(1);
-        }
-
-        if let Some(ref current) = gw.current_chrom {
-            for c in &gw.chromosomes {
-                if c != current {
-                    finished_chroms.insert(c.clone());
-                }
-            }
-        }
-    }
-    pb.finish(&format!("{} variants extracted", gw.variant_count()));
+    crate::ingest::vcf::stream_genotypes(
+        vcf_paths,
+        &mut gw,
+        available_memory,
+        threads,
+        geno_dir.clone(),
+        output,
+    )?;
 
     let total_variants = gw.variant_count();
     let source_vcfs = vcf_paths.iter().map(|p| p.display().to_string()).collect();
@@ -214,9 +165,20 @@ impl GenotypeWriter {
         })
     }
 
-    /// Push one biallelic variant with dosages extracted from raw VCF sample text.
-    /// `chrom` and `pos/ref/alt` must already be normalized.
-    /// `alt_idx` is the 1-based index of this alt allele in the original record.
+    /// Chromosome currently being written, or `None` before the first push.
+    pub fn current_chrom(&self) -> Option<&str> {
+        self.current_chrom.as_deref()
+    }
+
+    /// Every chromosome touched so far in insertion order, including the one
+    /// currently open.
+    pub fn chromosomes(&self) -> &[String] {
+        &self.chromosomes
+    }
+
+    /// Push one biallelic variant. `chrom` and `pos/ref/alt` must already be
+    /// normalized. `alt_idx` is the 1-based index of this alt allele in the
+    /// original VCF record.
     #[allow(clippy::too_many_arguments)]
     pub fn push(
         &mut self,
@@ -242,9 +204,9 @@ impl GenotypeWriter {
             let mut sample_idx: usize = 0;
             let mut start: usize = 0;
 
-            // memchr uses AVX2/SSE4.2 to find tabs at 32 bytes/cycle.
-            // For 200K-sample lines (~7MB), this replaces the dominant cost
-            // of byte-by-byte split('\t').
+            // memchr uses AVX2/SSE4.2 to find tabs at 32 bytes/cycle. For
+            // 200K-sample lines (~7MB), this replaces the dominant cost of
+            // byte-by-byte split('\t').
             for tab_pos in memchr::memchr_iter(b'\t', bytes) {
                 if sample_idx >= n { break; }
                 let gt_len = gt_prefix_len(&bytes[start..tab_pos]);
@@ -385,40 +347,6 @@ impl Drop for GenotypeWriter {
             let _ = w.close();
         }
     }
-}
-
-fn process_record_geno(
-    record: &noodles_vcf::Record,
-    gw: &mut GenotypeWriter,
-    ref_buf: &mut String,
-    alt_buf: &mut String,
-    output: &dyn Output,
-) -> Result<(), CohortError> {
-    let chrom = match normalize_chrom(record.reference_sequence_name()) {
-        Some(c) => c,
-        None => return Ok(()),
-    };
-    let pos = match record.variant_start() {
-        Some(Ok(p)) => p.get() as i32,
-        _ => return Ok(()),
-    };
-
-    ascii_uppercase_into(record.reference_bases(), ref_buf);
-    let alt_bases = record.alternate_bases();
-    let alt_str: &str = alt_bases.as_ref();
-    let samples_raw = record.samples();
-    let samples_str: &str = samples_raw.as_ref();
-
-    for (alt_idx, alt) in alt_str.split(',').enumerate() {
-        ascii_uppercase_into(alt.trim(), alt_buf);
-        if alt_buf == "*" || alt_buf == "." || alt_buf.is_empty() || alt_buf.starts_with('<') {
-            continue;
-        }
-
-        let (nr, na, np) = parsimony_normalize(ref_buf, alt_buf, pos);
-        gw.push(chrom, np, nr, na, samples_str, (alt_idx + 1) as u8, output)?;
-    }
-    Ok(())
 }
 
 /// Row-group capacity the GenotypeWriter would allocate under `available_memory`,

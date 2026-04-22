@@ -8,7 +8,7 @@ use parquet::file::reader::FileReader;
 
 use crate::error::CohortError;
 
-use super::{sniff_delimiter, Delimiter, InputFormat};
+use super::{sniff_delimiter, Delimiter, InputFormat, VariantReader};
 
 /// Detection confidence: 0.0 (no match) to 1.0 (certain).
 pub enum DetectResult {
@@ -41,6 +41,20 @@ pub trait FormatHandler: Send + Sync {
 
     /// For tabular formats, the detected delimiter (if any).
     fn delimiter(&self, path: &Path) -> Option<Delimiter>;
+
+    /// Open a streaming variant reader. Default errors so tabular/parquet
+    /// handlers (which don't carry genotypes) can skip the impl.
+    fn open_reader(
+        &self,
+        path: &Path,
+        _threads: usize,
+    ) -> Result<Box<dyn VariantReader>, CohortError> {
+        Err(CohortError::Input(format!(
+            "format '{}' does not support variant streaming for '{}'",
+            self.name(),
+            path.display()
+        )))
+    }
 }
 
 fn path_lower(path: &Path) -> String {
@@ -99,6 +113,14 @@ impl FormatHandler for VcfHandler {
     }
     fn delimiter(&self, _path: &Path) -> Option<Delimiter> {
         None
+    }
+
+    fn open_reader(
+        &self,
+        path: &Path,
+        threads: usize,
+    ) -> Result<Box<dyn VariantReader>, CohortError> {
+        Ok(Box::new(super::vcf::VcfVariantReader::open(path, threads)?))
     }
 }
 

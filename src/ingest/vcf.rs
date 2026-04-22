@@ -5,7 +5,7 @@
 //! Batch size is derived from the caller's memory budget (see `derive_batch_size`).
 //! Multi-allelic sites are split into biallelic records.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroUsize;
@@ -19,6 +19,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
+use super::{RawRecord, VariantReader};
 use crate::staar::genotype::GenotypeWriter;
 use crate::store::list::VariantSetWriter;
 use crate::error::CohortError;
@@ -258,6 +259,101 @@ pub(crate) fn ascii_uppercase_into(src: &str, buf: &mut String) {
     }
 }
 
+/// Owns a reusable `noodles_vcf::Record` so iteration does not allocate per
+/// row. Field wrappers (`AlternateBases`, `Ids`, `Filters`, `Samples`) live
+/// as locals inside `for_each` so their `&str` borrows stay alive across the
+/// closure call.
+pub struct VcfVariantReader {
+    inner: noodles_vcf::io::Reader<Box<dyn BufRead + Send>>,
+    record: noodles_vcf::Record,
+    qual_buf: String,
+    path: PathBuf,
+}
+
+impl VcfVariantReader {
+    pub fn open(path: &Path, threads: usize) -> Result<Self, CohortError> {
+        let buf = open_vcf(path, threads)?;
+        let mut inner = noodles_vcf::io::Reader::new(buf);
+        inner.read_header().map_err(|e| {
+            CohortError::Input(format!("VCF header in '{}': {e}", path.display()))
+        })?;
+        Ok(Self {
+            inner,
+            record: noodles_vcf::Record::default(),
+            qual_buf: String::with_capacity(32),
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl VariantReader for VcfVariantReader {
+    fn for_each(
+        &mut self,
+        f: &mut dyn for<'a> FnMut(RawRecord<'a>) -> Result<(), CohortError>,
+    ) -> Result<(), CohortError> {
+        loop {
+            let n = self.inner.read_record(&mut self.record).map_err(|e| {
+                CohortError::Analysis(format!(
+                    "VCF parse error in {}: {e}",
+                    self.path.display()
+                ))
+            })?;
+            if n == 0 {
+                return Ok(());
+            }
+
+            let position = match self.record.variant_start() {
+                Some(Ok(p)) => p.get() as i32,
+                _ => continue,
+            };
+
+            self.qual_buf.clear();
+            let qual: Option<&str> = match self.record.quality_score() {
+                Some(Ok(q)) => {
+                    use std::fmt::Write;
+                    let _ = write!(self.qual_buf, "{q}");
+                    Some(self.qual_buf.as_str())
+                }
+                _ => None,
+            };
+
+            let alt_bases = self.record.alternate_bases();
+            let alt_alleles: &str = alt_bases.as_ref();
+
+            let ids = self.record.ids();
+            let ids_raw: &str = ids.as_ref();
+            let rsid = if ids_raw.is_empty() || ids_raw == "." {
+                None
+            } else {
+                ids_raw.split(';').next()
+            };
+
+            let filters = self.record.filters();
+            let filter_raw: &str = filters.as_ref();
+            let filter = if filter_raw.is_empty() || filter_raw == "." {
+                None
+            } else {
+                Some(filter_raw)
+            };
+
+            let samples = self.record.samples();
+            let samples_text: &str = samples.as_ref();
+
+            let rec = RawRecord {
+                chromosome: self.record.reference_sequence_name(),
+                position,
+                ref_allele: self.record.reference_bases(),
+                alt_alleles,
+                rsid,
+                qual,
+                filter,
+                samples_text,
+            };
+            f(rec)?;
+        }
+    }
+}
+
 /// Ingest result stats.
 pub struct VcfIngestResult {
     pub variant_count: u64,
@@ -275,10 +371,13 @@ struct ChromWriter {
 
 /// Mutable state for the record-processing loop. Owns the reusable buffers,
 /// per-chromosome writers, and counters. Used by both sequential and parallel paths.
+/// `skip_variants` switches the genotype-only mode used by `extract_genotypes`:
+/// variants.parquet writers are not created and cross-file chromosome-order
+/// violations are surfaced as errors (because `GenotypeWriter` is single-chrom
+/// streaming and cannot reopen a closed part).
 struct RecordContext<'a> {
     ref_buf: String,
     alt_buf: String,
-    qual_buf: String,
     writers: HashMap<&'static str, ChromWriter>,
     geno_writer: Option<&'a mut GenotypeWriter>,
     schema: Arc<Schema>,
@@ -290,6 +389,8 @@ struct RecordContext<'a> {
     variant_count: u64,
     filtered_contigs: u64,
     multiallelic_split: u64,
+    skip_variants: bool,
+    finished_chroms: HashSet<&'static str>,
 }
 
 impl<'a> RecordContext<'a> {
@@ -300,6 +401,43 @@ impl<'a> RecordContext<'a> {
         part_id: Option<usize>,
         chromosome_filter: Option<crate::types::ChromosomeSet>,
     ) -> Self {
+        Self::build(
+            geno_writer,
+            memory_budget,
+            output_dir,
+            part_id,
+            chromosome_filter,
+            false,
+        )
+    }
+
+    /// Genotype-only mode: `variants.parquet` is not written. Used by
+    /// `extract_genotypes`. Cross-file chromosome-order violations error out
+    /// because the `GenotypeWriter` is single-chrom streaming.
+    fn new_genotype_only(
+        geno_writer: &'a mut GenotypeWriter,
+        memory_budget: u64,
+        output_dir: PathBuf,
+        chromosome_filter: Option<crate::types::ChromosomeSet>,
+    ) -> Self {
+        Self::build(
+            Some(geno_writer),
+            memory_budget,
+            output_dir,
+            None,
+            chromosome_filter,
+            true,
+        )
+    }
+
+    fn build(
+        geno_writer: Option<&'a mut GenotypeWriter>,
+        memory_budget: u64,
+        output_dir: PathBuf,
+        part_id: Option<usize>,
+        chromosome_filter: Option<crate::types::ChromosomeSet>,
+        skip_variants: bool,
+    ) -> Self {
         let batch_size = derive_batch_size(memory_budget);
         let schema = Arc::new(vcf_schema());
         let props = WriterProperties::builder()
@@ -309,7 +447,6 @@ impl<'a> RecordContext<'a> {
         Self {
             ref_buf: String::with_capacity(256),
             alt_buf: String::with_capacity(256),
-            qual_buf: String::with_capacity(32),
             writers: HashMap::new(),
             geno_writer,
             schema,
@@ -321,6 +458,8 @@ impl<'a> RecordContext<'a> {
             variant_count: 0,
             filtered_contigs: 0,
             multiallelic_split: 0,
+            skip_variants,
+            finished_chroms: HashSet::new(),
         }
     }
 
@@ -335,14 +474,17 @@ impl<'a> RecordContext<'a> {
         Ok(dir.join(name))
     }
 
-    fn process_record(
+    fn process(
         &mut self,
-        record: &noodles_vcf::Record,
+        rec: RawRecord<'_>,
         output: &dyn Output,
     ) -> Result<(), CohortError> {
-        let chrom = match normalize_chrom(record.reference_sequence_name()) {
+        let chrom = match normalize_chrom(rec.chromosome) {
             Some(c) => c,
-            None => { self.filtered_contigs += 1; return Ok(()); }
+            None => {
+                self.filtered_contigs += 1;
+                return Ok(());
+            }
         };
         if let Some(filt) = &self.chromosome_filter {
             if !filt.contains_canonical(chrom) {
@@ -350,84 +492,112 @@ impl<'a> RecordContext<'a> {
                 return Ok(());
             }
         }
-        let pos = match record.variant_start() {
-            Some(Ok(p)) => p.get() as i32,
-            _ => return Ok(()),
-        };
 
-        ascii_uppercase_into(record.reference_bases(), &mut self.ref_buf);
-
-        let alt_bases = record.alternate_bases();
-        let alt_str: &str = alt_bases.as_ref();
-
-        let ids_wrapper = record.ids();
-        let ids_str: &str = ids_wrapper.as_ref();
-        let rsid = if ids_str.is_empty() || ids_str == "." {
-            None
-        } else {
-            ids_str.split(';').next()
-        };
-
-        self.qual_buf.clear();
-        let qual_ref: Option<&str> = match record.quality_score() {
-            Some(Ok(q)) => {
-                use std::fmt::Write;
-                let _ = write!(self.qual_buf, "{q}");
-                Some(self.qual_buf.as_str())
+        // Genotype-only mode: the `GenotypeWriter` streams one chromosome
+        // at a time. Re-opening a chromosome whose part file was already
+        // closed would overwrite data, so surface it as an input error.
+        if self.skip_variants {
+            if let Some(ref gw) = self.geno_writer {
+                if gw.current_chrom() != Some(chrom)
+                    && self.finished_chroms.contains(chrom)
+                {
+                    return Err(CohortError::Input(format!(
+                        "Chromosome {chrom} appears in the current input but \
+                         its writer was already closed after processing an \
+                         earlier file. Sort VCF files by chromosome or use \
+                         one file per chromosome."
+                    )));
+                }
             }
-            _ => None,
-        };
+        }
 
-        let filters_wrapper = record.filters();
-        let filter_raw: &str = filters_wrapper.as_ref();
-        let filter_str: Option<&str> = if filter_raw.is_empty() || filter_raw == "." {
-            None
+        let pos = rec.position;
+        ascii_uppercase_into(rec.ref_allele, &mut self.ref_buf);
+
+        let alt_str = rec.alt_alleles;
+        let alt_count = if alt_str.is_empty() {
+            0
         } else {
-            Some(filter_raw)
+            alt_str.matches(',').count() + 1
         };
-
-        let alt_count = if alt_str.is_empty() { 0 } else { alt_str.matches(',').count() + 1 };
         if alt_count > 1 {
             self.multiallelic_split += alt_count as u64 - 1;
         }
 
-        let samples_raw;
-        let samples_str: &str = if self.geno_writer.is_some() {
-            samples_raw = record.samples();
-            samples_raw.as_ref()
-        } else {
-            ""
-        };
-
         for (alt_idx, alt) in alt_str.split(',').enumerate() {
             ascii_uppercase_into(alt.trim(), &mut self.alt_buf);
-            if self.alt_buf == "*" || self.alt_buf == "." || self.alt_buf.is_empty() || self.alt_buf.starts_with('<') {
+            if self.alt_buf == "*"
+                || self.alt_buf == "."
+                || self.alt_buf.is_empty()
+                || self.alt_buf.starts_with('<')
+            {
                 continue;
             }
 
             let (nr, na, np) = parsimony_normalize(&self.ref_buf, &self.alt_buf, pos);
 
-            // Split borrow: writers HashMap mutably, ref_buf/alt_buf stay
-            // immutably borrowed through nr/na from parsimony_normalize.
-            let cw = Self::get_or_create_writer(
-                chrom, &mut self.writers, &self.output_dir, self.part_id,
-                &self.schema, &self.props, self.batch_size, output,
-            )?;
-            cw.batch.push(chrom, np, nr, na, rsid, qual_ref, filter_str);
-            cw.count += 1;
+            if !self.skip_variants {
+                let cw = Self::get_or_create_writer(
+                    chrom,
+                    &mut self.writers,
+                    &self.output_dir,
+                    self.part_id,
+                    &self.schema,
+                    &self.props,
+                    self.batch_size,
+                    output,
+                )?;
+                cw.batch.push(chrom, np, nr, na, rec.rsid, rec.qual, rec.filter);
+                cw.count += 1;
+
+                if cw.batch.is_full() {
+                    let rb = cw.batch.finish()?;
+                    cw.writer
+                        .write(&rb)
+                        .map_err(|e| CohortError::Resource(format!("Parquet write error: {e}")))?;
+                }
+            }
             self.variant_count += 1;
 
-            if cw.batch.is_full() {
-                let rb = cw.batch.finish()?;
-                cw.writer
-                    .write(&rb)
-                    .map_err(|e| CohortError::Resource(format!("Parquet write error: {e}")))?;
-            }
-
             if let Some(ref mut gw) = self.geno_writer {
-                gw.push(chrom, np, nr, na, samples_str, (alt_idx + 1) as u8, output)?;
+                gw.push(chrom, np, nr, na, rec.samples_text, (alt_idx + 1) as u8, output)?;
             }
         }
+        Ok(())
+    }
+
+    /// End-of-file hook: in genotype-only mode, mark every chromosome the
+    /// `GenotypeWriter` has touched except the current one as finished, so
+    /// the next file reopening those triggers the `skip_variants` guard in
+    /// `process`.
+    fn finish_file(&mut self) {
+        if !self.skip_variants {
+            return;
+        }
+        let Some(ref gw) = self.geno_writer else { return };
+        let current = gw.current_chrom();
+        for c in gw.chromosomes() {
+            if Some(c.as_str()) != current {
+                if let Some(canon) = normalize_chrom(c) {
+                    self.finished_chroms.insert(canon);
+                }
+            }
+        }
+    }
+
+    fn drive(
+        &mut self,
+        reader: &mut dyn VariantReader,
+        label: &str,
+        output: &dyn Output,
+    ) -> Result<(), CohortError> {
+        let pb = output.progress(0, label);
+        reader.for_each(&mut |rec| {
+            self.process(rec, output)?;
+            pb.inc(1);
+            Ok(())
+        })?;
+        pb.finish(&format!("{} variants ingested", self.variant_count));
         Ok(())
     }
 
@@ -526,8 +696,6 @@ impl<'a> RecordContext<'a> {
         })
     }
 
-    /// Stream files through this context. Each file is opened, parsed,
-    /// and its records fed to process_record.
     fn ingest_files(
         &mut self,
         files: &[impl AsRef<Path>],
@@ -544,39 +712,31 @@ impl<'a> RecordContext<'a> {
                     input_path.file_name().unwrap_or_default().to_string_lossy()
                 ));
             }
-
-            let reader = open_vcf(input_path, threads)?;
-            let mut vcf_reader = noodles_vcf::io::Reader::new(reader);
-            {
-                let mut hr = vcf_reader.header_reader();
-                std::io::copy(&mut hr, &mut std::io::sink()).map_err(|e| {
-                    CohortError::Input(format!(
-                        "Skip VCF header in {}: {e}",
-                        input_path.display()
-                    ))
-                })?;
-            }
-
-            let pb = output.progress(
-                0,
-                &format!(
-                    "ingesting {}",
-                    input_path.file_name().unwrap_or_default().to_string_lossy()
-                ),
+            let mut reader = VcfVariantReader::open(input_path, threads)?;
+            let label = format!(
+                "ingesting {}",
+                input_path.file_name().unwrap_or_default().to_string_lossy()
             );
-            for result in vcf_reader.records() {
-                let record = result.map_err(|e| {
-                    CohortError::Analysis(format!(
-                        "VCF parse error in {}: {e}", input_path.display()
-                    ))
-                })?;
-                self.process_record(&record, output)?;
-                pb.inc(1);
-            }
-            pb.finish(&format!("{} variants ingested", self.variant_count));
+            self.drive(&mut reader, &label, output)?;
+            self.finish_file();
         }
         Ok(())
     }
+}
+
+/// Stream genotypes into an existing `GenotypeWriter`. No `variants.parquet`
+/// is written — this is the standalone extraction path used by the cohort
+/// store when variants have already been ingested separately.
+pub fn stream_genotypes(
+    vcf_paths: &[PathBuf],
+    gw: &mut GenotypeWriter,
+    memory_budget: u64,
+    threads: usize,
+    geno_dir: PathBuf,
+    output: &dyn Output,
+) -> Result<(), CohortError> {
+    let mut ctx = RecordContext::new_genotype_only(gw, memory_budget, geno_dir, None);
+    ctx.ingest_files(vcf_paths, threads, output)
 }
 
 /// Stream one or more VCF files to per-chromosome parquet files (sequential).
