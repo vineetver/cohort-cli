@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vineetver/favor-cli/actions/workflows/ci.yml"><img src="https://github.com/vineetver/favor-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/vineetver/favor-cli/actions/workflows/ci.yml?query=branch%3Amaster"><img src="https://github.com/vineetver/favor-cli/actions/workflows/ci.yml/badge.svg?branch=master&event=push" alt="CI"></a>
   <a href="https://github.com/vineetver/favor-cli/releases/latest"><img src="https://img.shields.io/github/v/release/vineetver/favor-cli?color=blue" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/rust-stable-orange" alt="Rust">
