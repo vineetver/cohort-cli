@@ -26,8 +26,6 @@ jobs:
           - os: macos-15
             artifact: favor-x86_64-macos
             target: x86_64-apple-darwin
-          - os: windows-latest
-            artifact: favor-x86_64-windows
 
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container || '' }}
@@ -86,8 +84,7 @@ jobs:
         if: matrix.target == '' && matrix.container == ''
         run: cargo build --release
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           if [ -n "${{ matrix.target }}" ]; then
             BIN=target/${{ matrix.target }}/release/favor
@@ -98,14 +95,6 @@ jobs:
           shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256 2>/dev/null \
             || sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
 
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path target/release/favor.exe -DestinationPath ${{ matrix.artifact }}.zip
-          (Get-FileHash ${{ matrix.artifact }}.zip -Algorithm SHA256).Hash + "  ${{ matrix.artifact }}.zip" `
-            | Out-File ${{ matrix.artifact }}.zip.sha256
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -113,8 +102,6 @@ jobs:
           path: |
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.tar.gz.sha256
-            ${{ matrix.artifact }}.zip
-            ${{ matrix.artifact }}.zip.sha256
           if-no-files-found: ignore
 
   release:
@@ -132,6 +119,4 @@ jobs:
           files: |
             *.tar.gz
             *.tar.gz.sha256
-            *.zip
-            *.zip.sha256
           generate_release_notes: true

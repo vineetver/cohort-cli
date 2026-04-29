@@ -4,16 +4,8 @@
 
 ## Install
 
-Linux/macOS:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vineetver/favor-cli/master/install.sh | sh
-```
-
-Windows (PowerShell):
-
-```powershell
-irm https://raw.githubusercontent.com/vineetver/favor-cli/master/install.ps1 | iex
 ```
 
 From source:
